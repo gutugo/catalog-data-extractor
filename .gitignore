@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.env
+
+# Data files (PDFs and extracted data)
+catalogs/
+processed/
+
+# Dependencies
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

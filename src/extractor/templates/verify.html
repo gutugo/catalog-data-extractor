@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify: {{ catalog_name }}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header */
+        .header {
+            background: #16213e;
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        .header-info {
+            display: flex;
+            gap: 20px;
+            font-size: 14px;
+            color: #888;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+
+        .btn-primary {
+            background: #e94560;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #ff6b6b;
+        }
+
+        .btn-secondary {
+            background: #0f3460;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #1a4a7a;
+        }
+
+        /* Main container */
+        .main-container {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* Left panel - PDF viewer */
+        .pdf-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #0f3460;
+            min-width: 0;
+        }
+
+        .panel-header {
+            background: #16213e;
+            padding: 10px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .pdf-container {
+            flex: 1;
+            overflow: auto;
+            position: relative;
+            background: #0d0d1a;
+        }
+
+        .pdf-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+
+        .pdf-image {
+            display: block;
+            max-width: 100%;
+        }
+
+        /* Canvas overlay for drawing */
+        .selection-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            cursor: crosshair;
+        }
+
+        /* Right panel - Extracted data */
+        .data-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .products-container {
+            flex: 1;
+            overflow: auto;
+            padding: 15px;
+        }
+
+        .product-card {
+            background: #16213e;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 10px;
+            border: 1px solid #0f3460;
+            transition: border-color 0.2s;
+        }
+
+        .product-card:hover {
+            border-color: #e94560;
+        }
+
+        .product-card.selected {
+            border-color: #e94560;
+            box-shadow: 0 0 10px rgba(233, 69, 96, 0.3);
+        }
+
+        .product-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+        }
+
+        .product-item-no {
+            background: #e94560;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .product-actions {
+            display: flex;
+            gap: 5px;
+        }
+
+        .product-actions button {
+            background: none;
+            border: none;
+            color: #888;
+            cursor: pointer;
+            padding: 2px 6px;
+            font-size: 12px;
+        }
+
+        .product-actions button:hover {
+            color: #e94560;
+        }
+
+        .product-name {
+            font-size: 14px;
+            margin-bottom: 6px;
+            line-height: 1.4;
+        }
+
+        .product-details {
+            display: flex;
+            gap: 15px;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .product-detail {
+            display: flex;
+            gap: 4px;
+        }
+
+        .product-detail label {
+            color: #666;
+        }
+
+        /* Navigation */
+        .nav-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .nav-btn {
+            background: #0f3460;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .nav-btn:hover:not(:disabled) {
+            background: #1a4a7a;
+        }
+
+        .nav-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .page-indicator {
+            font-size: 14px;
+        }
+
+        /* Selection info */
+        .selection-info {
+            background: #0f3460;
+            padding: 10px 15px;
+            border-top: 1px solid #16213e;
+            font-size: 13px;
+        }
+
+        .selection-info.has-selection {
+            background: #1a4a3e;
+        }
+
+        .selection-text {
+            font-family: monospace;
+            background: #1a1a2e;
+            padding: 8px;
+            border-radius: 4px;
+            margin-top: 8px;
+            max-height: 100px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+
+        /* Edit modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            width: 500px;
+            max-width: 90%;
+        }
+
+        .modal h2 {
+            font-size: 18px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 5px;
+        }
+
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #1a1a2e;
+            color: #eee;
+            font-size: 14px;
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 15px;
+        }
+
+        .form-row .form-group {
+            flex: 1;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        /* Toast notifications */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #16213e;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 2000;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .toast.success {
+            border-left: 4px solid #4ade80;
+        }
+
+        .toast.error {
+            border-left: 4px solid #ef4444;
+        }
+
+        /* Zoom controls */
+        .zoom-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .zoom-controls input[type="range"] {
+            width: 100px;
+        }
+
+        /* Instructions */
+        .instructions {
+            font-size: 12px;
+            color: #666;
+            padding: 10px 15px;
+            background: #0d0d1a;
+            border-top: 1px solid #0f3460;
+        }
+
+        .instructions kbd {
+            background: #0f3460;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{{ catalog_name }}</h1>
+        <div class="header-info">
+            <span>{{ total_pages }} pages</span>
+            <span><span id="product-count">{{ total_products }}</span> products</span>
+        </div>
+        <div class="header-actions">
+            <button class="btn btn-secondary" onclick="addProduct()">+ Add Product</button>
+            <button class="btn btn-primary" onclick="saveSession()">Save</button>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <!-- Left panel: PDF viewer -->
+        <div class="pdf-panel">
+            <div class="panel-header">
+                <span class="panel-title">PDF Page</span>
+                <div class="nav-controls">
+                    <button class="nav-btn" id="prev-btn" onclick="goToPage(currentPage - 1)">&larr; Prev</button>
+                    <span class="page-indicator">
+                        <input type="number" id="page-input" min="1" max="{{ total_pages }}" value="1"
+                               style="width: 50px; text-align: center; background: #0f3460; border: none; color: white; padding: 4px; border-radius: 3px;"
+                               onchange="goToPage(parseInt(this.value))">
+                        / {{ total_pages }}
+                    </span>
+                    <button class="nav-btn" id="next-btn" onclick="goToPage(currentPage + 1)">Next &rarr;</button>
+                </div>
+                <div class="zoom-controls">
+                    <span style="font-size: 12px;">Zoom:</span>
+                    <input type="range" id="zoom-slider" min="1" max="4" step="0.5" value="2" onchange="changeZoom(this.value)">
+                    <span id="zoom-value" style="font-size: 12px;">2x</span>
+                </div>
+            </div>
+            <div class="pdf-container" id="pdf-container">
+                <div class="pdf-wrapper" id="pdf-wrapper">
+                    <img class="pdf-image" id="pdf-image" src="" alt="PDF Page">
+                    <canvas class="selection-canvas" id="selection-canvas"></canvas>
+                </div>
+            </div>
+            <div class="selection-info" id="selection-info">
+                <strong>Selection:</strong> Draw a box on the PDF to extract text
+                <div class="selection-text" id="selection-text" style="display: none;"></div>
+            </div>
+            <div class="instructions">
+                <kbd>Click + Drag</kbd> to select region &nbsp;|&nbsp;
+                <kbd>Esc</kbd> to clear selection &nbsp;|&nbsp;
+                <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate pages
+            </div>
+        </div>
+
+        <!-- Right panel: Extracted data -->
+        <div class="data-panel">
+            <div class="panel-header">
+                <span class="panel-title">Extracted Products</span>
+                <span id="page-product-count" style="font-size: 12px; color: #888;">0 products on this page</span>
+            </div>
+            <div class="products-container" id="products-container">
+                <!-- Products will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit modal -->
+    <div class="modal-overlay" id="edit-modal">
+        <div class="modal">
+            <h2 id="modal-title">Edit Product</h2>
+            <input type="hidden" id="edit-id">
+            <div class="form-group">
+                <label>Product Name</label>
+                <textarea id="edit-product-name"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Description / Count</label>
+                <input type="text" id="edit-description">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Item #</label>
+                    <input type="text" id="edit-item-no">
+                </div>
+                <div class="form-group">
+                    <label>Package</label>
+                    <input type="text" id="edit-pkg">
+                </div>
+                <div class="form-group">
+                    <label>UOM</label>
+                    <input type="text" id="edit-uom">
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveProduct()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // State
+        let currentPage = 1;
+        let totalPages = {{ total_pages }};
+        let currentZoom = 2.0;
+        let products = [];
+        let selectedProductId = null;
+
+        // Selection state
+        let isSelecting = false;
+        let selectionStart = null;
+        let selectionRect = null;
+
+        // DOM elements
+        const pdfImage = document.getElementById('pdf-image');
+        const canvas = document.getElementById('selection-canvas');
+        const ctx = canvas.getContext('2d');
+        const productsContainer = document.getElementById('products-container');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadPage(1);
+            setupCanvasEvents();
+            setupKeyboardShortcuts();
+        });
+
+        // Load a page
+        async function loadPage(pageNum) {
+            currentPage = pageNum;
+            document.getElementById('page-input').value = pageNum;
+            document.getElementById('prev-btn').disabled = pageNum <= 1;
+            document.getElementById('next-btn').disabled = pageNum >= totalPages;
+
+            // Load image
+            pdfImage.src = `/api/page/${pageNum}/image?zoom=${currentZoom}`;
+
+            // Wait for image to load (with error handling)
+            await new Promise((resolve, reject) => {
+                pdfImage.onload = resolve;
+                pdfImage.onerror = () => {
+                    showToast('Failed to load page image', 'error');
+                    reject(new Error('Image load failed'));
+                };
+            }).catch(() => {});
+
+            // Resize canvas to match image
+            canvas.width = pdfImage.naturalWidth;
+            canvas.height = pdfImage.naturalHeight;
+            clearSelection();
+
+            // Load products
+            const response = await fetch(`/api/page/${pageNum}`);
+            const data = await response.json();
+            products = data.products;
+            renderProducts();
+        }
+
+        function goToPage(pageNum) {
+            if (pageNum >= 1 && pageNum <= totalPages) {
+                loadPage(pageNum);
+            }
+        }
+
+        function changeZoom(value) {
+            currentZoom = parseFloat(value);
+            document.getElementById('zoom-value').textContent = value + 'x';
+            loadPage(currentPage);
+        }
+
+        // Render products list
+        function renderProducts() {
+            document.getElementById('page-product-count').textContent =
+                `${products.length} product${products.length !== 1 ? 's' : ''} on this page`;
+
+            if (products.length === 0) {
+                productsContainer.innerHTML = `
+                    <div style="text-align: center; padding: 40px; color: #666;">
+                        <p>No products extracted from this page</p>
+                        <p style="margin-top: 10px; font-size: 13px;">
+                            Draw a selection on the PDF to extract text,<br>
+                            or click "Add Product" to add manually.
+                        </p>
+                    </div>
+                `;
+                return;
+            }
+
+            productsContainer.innerHTML = products.map((p, i) => `
+                <div class="product-card ${selectedProductId === p.id ? 'selected' : ''}"
+                     data-id="${p.id}" onclick="selectProduct('${p.id}')">
+                    <div class="product-header">
+                        <span class="product-item-no">#${p.item_no || '?'}</span>
+                        <div class="product-actions">
+                            <button onclick="event.stopPropagation(); editProduct('${p.id}')">Edit</button>
+                            <button onclick="event.stopPropagation(); deleteProduct('${p.id}')">Delete</button>
+                        </div>
+                    </div>
+                    <div class="product-name">${escapeHtml(p.product_name)}</div>
+                    <div class="product-details">
+                        <div class="product-detail">
+                            <label>Desc:</label>
+                            <span>${escapeHtml(p.description) || '-'}</span>
+                        </div>
+                        <div class="product-detail">
+                            <label>Pkg:</label>
+                            <span>${p.pkg || '-'}</span>
+                        </div>
+                        <div class="product-detail">
+                            <label>UOM:</label>
+                            <span>${p.uom || '-'}</span>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function selectProduct(id) {
+            selectedProductId = id;
+            renderProducts();
+        }
+
+        // Canvas events for selection
+        function setupCanvasEvents() {
+            canvas.addEventListener('mousedown', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+
+                isSelecting = true;
+                selectionStart = {
+                    x: (e.clientX - rect.left) * scaleX,
+                    y: (e.clientY - rect.top) * scaleY
+                };
+                selectionRect = null;
+            });
+
+            canvas.addEventListener('mousemove', (e) => {
+                if (!isSelecting) return;
+
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+
+                const currentX = (e.clientX - rect.left) * scaleX;
+                const currentY = (e.clientY - rect.top) * scaleY;
+
+                selectionRect = {
+                    x: Math.min(selectionStart.x, currentX),
+                    y: Math.min(selectionStart.y, currentY),
+                    width: Math.abs(currentX - selectionStart.x),
+                    height: Math.abs(currentY - selectionStart.y)
+                };
+
+                drawSelection();
+            });
+
+            canvas.addEventListener('mouseup', async () => {
+                if (!isSelecting || !selectionRect) return;
+                isSelecting = false;
+
+                if (selectionRect.width > 10 && selectionRect.height > 10) {
+                    await extractTextFromSelection();
+                }
+            });
+
+            canvas.addEventListener('mouseleave', () => {
+                if (isSelecting) {
+                    isSelecting = false;
+                }
+            });
+        }
+
+        function drawSelection() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (selectionRect) {
+                // Semi-transparent fill
+                ctx.fillStyle = 'rgba(233, 69, 96, 0.2)';
+                ctx.fillRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+
+                // Border
+                ctx.strokeStyle = '#e94560';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+                ctx.setLineDash([]);
+            }
+        }
+
+        function clearSelection() {
+            selectionRect = null;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            document.getElementById('selection-info').classList.remove('has-selection');
+            document.getElementById('selection-text').style.display = 'none';
+        }
+
+        async function extractTextFromSelection() {
+            if (!selectionRect) return;
+
+            const response = await fetch('/api/extract-text', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    page_number: currentPage,
+                    zoom: currentZoom,
+                    x0: selectionRect.x,
+                    y0: selectionRect.y,
+                    x1: selectionRect.x + selectionRect.width,
+                    y1: selectionRect.y + selectionRect.height
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success && data.text) {
+                document.getElementById('selection-info').classList.add('has-selection');
+                const textDiv = document.getElementById('selection-text');
+                textDiv.style.display = 'block';
+                textDiv.textContent = data.text;
+
+                // Auto-fill the add product modal
+                if (selectedProductId !== null) {
+                    // If a product is selected, offer to update it
+                    if (confirm('Apply this text to the selected product\'s name?')) {
+                        await updateProductField(selectedProductId, 'product_name', data.text);
+                    }
+                }
+            } else {
+                showToast('No text found in selection', 'error');
+            }
+        }
+
+        // Keyboard shortcuts
+        function setupKeyboardShortcuts() {
+            document.addEventListener('keydown', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+                if (e.key === 'ArrowLeft') {
+                    goToPage(currentPage - 1);
+                } else if (e.key === 'ArrowRight') {
+                    goToPage(currentPage + 1);
+                } else if (e.key === 'Escape') {
+                    clearSelection();
+                    closeModal();
+                }
+            });
+        }
+
+        // Product CRUD
+        function editProduct(id) {
+            const product = products.find(p => p.id === id);
+            if (!product) return;
+
+            document.getElementById('modal-title').textContent = 'Edit Product';
+            document.getElementById('edit-id').value = id;
+            document.getElementById('edit-product-name').value = product.product_name;
+            document.getElementById('edit-description').value = product.description;
+            document.getElementById('edit-item-no').value = product.item_no;
+            document.getElementById('edit-pkg').value = product.pkg;
+            document.getElementById('edit-uom').value = product.uom;
+
+            document.getElementById('edit-modal').classList.add('show');
+        }
+
+        function addProduct() {
+            document.getElementById('modal-title').textContent = 'Add Product';
+            document.getElementById('edit-id').value = '';
+            document.getElementById('edit-product-name').value = '';
+            document.getElementById('edit-description').value = '';
+            document.getElementById('edit-item-no').value = '';
+            document.getElementById('edit-pkg').value = '';
+            document.getElementById('edit-uom').value = '';
+
+            // Pre-fill with selected text if available
+            const selectionText = document.getElementById('selection-text').textContent;
+            if (selectionText) {
+                document.getElementById('edit-product-name').value = selectionText;
+            }
+
+            document.getElementById('edit-modal').classList.add('show');
+        }
+
+        function closeModal() {
+            document.getElementById('edit-modal').classList.remove('show');
+        }
+
+        async function saveProduct() {
+            const id = document.getElementById('edit-id').value;
+            const data = {
+                product_name: document.getElementById('edit-product-name').value,
+                description: document.getElementById('edit-description').value,
+                item_no: document.getElementById('edit-item-no').value,
+                pkg: document.getElementById('edit-pkg').value,
+                uom: document.getElementById('edit-uom').value,
+                page_number: currentPage
+            };
+
+            let response;
+            if (!id) {
+                // Add new product
+                response = await fetch('/api/product', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+            } else {
+                // Update existing product
+                response = await fetch(`/api/product/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+            }
+
+            const result = await response.json();
+            if (result.success) {
+                showToast(!id ? 'Product added' : 'Product updated', 'success');
+                closeModal();
+                loadPage(currentPage);
+                updateProductCount();
+            } else {
+                showToast('Error saving product', 'error');
+            }
+        }
+
+        async function deleteProduct(id) {
+            if (!confirm('Delete this product?')) return;
+
+            const response = await fetch(`/api/product/${id}`, {
+                method: 'DELETE'
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                showToast('Product deleted', 'success');
+                loadPage(currentPage);
+                updateProductCount();
+            } else {
+                showToast('Error deleting product', 'error');
+            }
+        }
+
+        async function updateProductField(id, field, value) {
+            const data = {};
+            data[field] = value;
+
+            const response = await fetch(`/api/product/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                showToast('Product updated', 'success');
+                loadPage(currentPage);
+            }
+        }
+
+        async function saveSession() {
+            const response = await fetch('/api/save', {
+                method: 'POST'
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                showToast(`Saved ${result.products_count} products`, 'success');
+            } else {
+                showToast('Error saving session', 'error');
+            }
+        }
+
+        async function updateProductCount() {
+            // Fetch total count from session stats
+            const response = await fetch('/api/stats');
+            const data = await response.json();
+            document.getElementById('product-count').textContent = data.total_products;
+        }
+
+        // Utilities
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `toast ${type} show`;
+
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
