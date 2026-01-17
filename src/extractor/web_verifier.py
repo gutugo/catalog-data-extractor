@@ -31,6 +31,10 @@ _state: dict = {
 
 # Background extraction jobs: {catalog_name: {'status': str, 'progress': dict, 'error': str}}
 _extraction_jobs: dict = {}
+_extraction_lock = threading.Lock()  # Thread lock for _extraction_jobs access
+
+# Track if cleanup has been registered
+_cleanup_registered = False
 
 
 def cleanup_pdf():
@@ -83,24 +87,28 @@ def list_catalogs() -> list[dict]:
             'status': 'uploaded',
         }
 
-        # Check if currently extracting
-        if name in _extraction_jobs:
-            job = _extraction_jobs[name]
-            catalog['status'] = job['status']
-            if job.get('progress'):
-                catalog['progress'] = job['progress']
-            if job.get('error'):
-                catalog['error'] = job['error']
-        # Check if has session
-        elif name in sessions:
-            session = ExtractionSession.load(sessions[name])
-            if session:
-                catalog['products_count'] = len(session.products)
-                catalog['pages'] = session.total_pages
-                catalog['status'] = 'exported' if name in exports else 'ready'
-        # Otherwise just uploaded PDF
-        elif name in pdf_files:
-            catalog['status'] = 'uploaded'
+        # Check if currently extracting (thread-safe access)
+        is_extracting = False
+        with _extraction_lock:
+            if name in _extraction_jobs:
+                is_extracting = True
+                job = _extraction_jobs[name]
+                catalog['status'] = job['status']
+                if job.get('progress'):
+                    catalog['progress'] = job['progress'].copy()
+                if job.get('error'):
+                    catalog['error'] = job['error']
+        # Check if has session (only if not currently extracting)
+        if not is_extracting:
+            if name in sessions:
+                session = ExtractionSession.load(sessions[name])
+                if session:
+                    catalog['products_count'] = len(session.products)
+                    catalog['pages'] = session.total_pages
+                    catalog['status'] = 'exported' if name in exports else 'ready'
+            # Otherwise just uploaded PDF
+            elif name in pdf_files:
+                catalog['status'] = 'uploaded'
 
         catalogs.append(catalog)
 
@@ -128,8 +136,11 @@ def init_app(pdf_path: Path = None, session: ExtractionSession = None,
         _state['pdf_doc'] = None
         _state['dashboard_mode'] = True
 
-    # Register cleanup on exit
-    atexit.register(cleanup_pdf)
+    # Register cleanup on exit (only once)
+    global _cleanup_registered
+    if not _cleanup_registered:
+        atexit.register(cleanup_pdf)
+        _cleanup_registered = True
 
     return app
 
@@ -217,9 +228,10 @@ def upload_catalog():
 @app.route('/api/extract/<catalog_name>', methods=['POST'])
 def start_extraction(catalog_name: str):
     """Start auto-extraction for a catalog."""
-    # Check if already extracting
-    if catalog_name in _extraction_jobs and _extraction_jobs[catalog_name]['status'] == 'extracting':
-        return jsonify({'error': 'Extraction already in progress'}), 400
+    # Check if already extracting (thread-safe)
+    with _extraction_lock:
+        if catalog_name in _extraction_jobs and _extraction_jobs[catalog_name]['status'] == 'extracting':
+            return jsonify({'error': 'Extraction already in progress'}), 400
 
     # Find the PDF
     pdf_path = CATALOGS_DIR / f"{catalog_name}.pdf"
@@ -228,19 +240,21 @@ def start_extraction(catalog_name: str):
     if not pdf_path.exists():
         return jsonify({'error': 'PDF not found'}), 404
 
-    # Initialize job status
-    _extraction_jobs[catalog_name] = {
-        'status': 'extracting',
-        'progress': {'page': 0, 'total_pages': 0, 'products': 0},
-        'error': None,
-    }
+    # Initialize job status (thread-safe)
+    with _extraction_lock:
+        _extraction_jobs[catalog_name] = {
+            'status': 'extracting',
+            'progress': {'page': 0, 'total_pages': 0, 'products': 0},
+            'error': None,
+        }
 
     def progress_callback(page_num, total_pages, products_count):
-        _extraction_jobs[catalog_name]['progress'] = {
-            'page': page_num,
-            'total_pages': total_pages,
-            'products': products_count,
-        }
+        with _extraction_lock:
+            _extraction_jobs[catalog_name]['progress'] = {
+                'page': page_num,
+                'total_pages': total_pages,
+                'products': products_count,
+            }
 
     def run_extraction():
         try:
@@ -250,11 +264,13 @@ def start_extraction(catalog_name: str):
             extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
             session = extractor.run(progress_callback=progress_callback, show_console=False)
 
-            _extraction_jobs[catalog_name]['status'] = 'completed'
-            _extraction_jobs[catalog_name]['progress']['products'] = len(session.products)
+            with _extraction_lock:
+                _extraction_jobs[catalog_name]['status'] = 'completed'
+                _extraction_jobs[catalog_name]['progress']['products'] = len(session.products)
         except Exception as e:
-            _extraction_jobs[catalog_name]['status'] = 'error'
-            _extraction_jobs[catalog_name]['error'] = str(e)
+            with _extraction_lock:
+                _extraction_jobs[catalog_name]['status'] = 'error'
+                _extraction_jobs[catalog_name]['error'] = str(e)
 
     # Start extraction in background thread
     thread = threading.Thread(target=run_extraction, daemon=True)
@@ -270,28 +286,30 @@ def start_extraction(catalog_name: str):
 @app.route('/api/extract/<catalog_name>/status')
 def get_extraction_status(catalog_name: str):
     """Get extraction progress for a catalog."""
-    if catalog_name not in _extraction_jobs:
-        # Check if session exists (already extracted)
-        session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
-        if session_path.exists():
-            session = ExtractionSession.load(session_path)
-            if session:
-                return jsonify({
-                    'status': 'completed',
-                    'progress': {
-                        'page': session.total_pages,
-                        'total_pages': session.total_pages,
-                        'products': len(session.products),
-                    },
-                })
-        return jsonify({'error': 'No extraction job found'}), 404
+    # Thread-safe access to _extraction_jobs
+    with _extraction_lock:
+        if catalog_name not in _extraction_jobs:
+            # Check if session exists (already extracted)
+            session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
+            if session_path.exists():
+                session = ExtractionSession.load(session_path)
+                if session:
+                    return jsonify({
+                        'status': 'completed',
+                        'progress': {
+                            'page': session.total_pages,
+                            'total_pages': session.total_pages,
+                            'products': len(session.products),
+                        },
+                    })
+            return jsonify({'error': 'No extraction job found'}), 404
 
-    job = _extraction_jobs[catalog_name]
-    return jsonify({
-        'status': job['status'],
-        'progress': job['progress'],
-        'error': job.get('error'),
-    })
+        job = _extraction_jobs[catalog_name]
+        return jsonify({
+            'status': job['status'],
+            'progress': job['progress'].copy(),
+            'error': job.get('error'),
+        })
 
 
 @app.route('/api/switch/<catalog_name>', methods=['POST'])
@@ -389,10 +407,10 @@ def get_page_image(page_num: int):
 
     # Get zoom level from query params (default 2x for good quality)
     try:
-        zoom = float(request.args.get('zoom', 2.0))
-        zoom = max(0.5, min(zoom, 5.0))  # Clamp between 0.5x and 5x
+        zoom = float(request.args.get('zoom', 1.0))
+        zoom = max(1.0, min(zoom, 5.0))  # Clamp between 1x and 5x
     except (ValueError, TypeError):
-        zoom = 2.0
+        zoom = 1.0
     mat = fitz.Matrix(zoom, zoom)
 
     pix = page.get_pixmap(matrix=mat)

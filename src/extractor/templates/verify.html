@@ -212,6 +212,11 @@
             color: #fee2e2;
         }
 
+        .status-completed {
+            background: #059669;
+            color: #d1fae5;
+        }
+
         .catalog-item-actions {
             display: flex;
             gap: 5px;
@@ -1028,10 +1033,13 @@
             container.innerHTML = catalogs.map(c => {
                 const isActive = activeCatalog && (c.name === activeCatalog.replace('.pdf', '').replace('.PDF', ''));
                 const statusClass = `status-${c.status}`;
+                // Escape catalog name for use in HTML attributes (prevents XSS)
+                const safeName = escapeHtml(c.name);
+                const safeNameJs = JSON.stringify(c.name);  // Safe for JS strings
 
                 let actions = '';
                 if (c.status === 'uploaded') {
-                    actions = `<button class="btn-extract" onclick="event.stopPropagation(); startExtraction('${c.name}')">Extract</button>`;
+                    actions = `<button class="btn-extract" onclick="event.stopPropagation(); startExtraction(${safeNameJs})">Extract</button>`;
                 } else if (c.status === 'extracting') {
                     const progress = c.progress || { page: 0, total_pages: 0 };
                     const pct = progress.total_pages > 0 ? (progress.page / progress.total_pages * 100) : 0;
@@ -1041,7 +1049,7 @@
                         </div>
                     `;
                 } else if (c.status === 'ready' || c.status === 'exported' || c.status === 'completed') {
-                    actions = `<button class="btn-view" onclick="event.stopPropagation(); switchCatalog('${c.name}')">View</button>`;
+                    actions = `<button class="btn-view" onclick="event.stopPropagation(); switchCatalog(${safeNameJs})">View</button>`;
                 }
 
                 let meta = '';
@@ -1052,9 +1060,9 @@
                 }
 
                 return `
-                    <div class="catalog-item ${isActive ? 'active' : ''}" data-name="${c.name}"
-                         onclick="switchCatalog('${c.name}')">
-                        <div class="catalog-item-name">${c.name}</div>
+                    <div class="catalog-item ${isActive ? 'active' : ''}" data-name="${safeName}"
+                         onclick="switchCatalog(${safeNameJs})">
+                        <div class="catalog-item-name">${safeName}</div>
                         <div class="catalog-item-meta">
                             <span>${meta}</span>
                             <span class="catalog-status ${statusClass}">${c.status}</span>
@@ -1488,30 +1496,6 @@
                 }
             } catch (err) {
                 showToast('Network error deleting product', 'error');
-            }
-        }
-
-        async function updateProductField(id, field, value) {
-            const data = {};
-            data[field] = value;
-
-            try {
-                const response = await fetch(`/api/product/${id}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-
-                const result = await response.json();
-                if (result.success) {
-                    hasUnsavedChanges = true;
-                    showToast('Product updated', 'success');
-                    loadPage(currentPage);
-                } else {
-                    showToast('Error updating product', 'error');
-                }
-            } catch (err) {
-                showToast('Network error updating product', 'error');
             }
         }
 
