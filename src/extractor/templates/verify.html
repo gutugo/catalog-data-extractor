@@ -121,13 +121,6 @@
             max-width: 100%;
         }
 
-        /* Canvas overlay for drawing */
-        .selection-canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            cursor: crosshair;
-        }
 
         /* Right panel - Extracted data */
         .data-panel {
@@ -244,29 +237,6 @@
 
         .page-indicator {
             font-size: 14px;
-        }
-
-        /* Selection info */
-        .selection-info {
-            background: #0f3460;
-            padding: 10px 15px;
-            border-top: 1px solid #16213e;
-            font-size: 13px;
-        }
-
-        .selection-info.has-selection {
-            background: #1a4a3e;
-        }
-
-        .selection-text {
-            font-family: monospace;
-            background: #1a1a2e;
-            padding: 8px;
-            border-radius: 4px;
-            margin-top: 8px;
-            max-height: 100px;
-            overflow: auto;
-            white-space: pre-wrap;
         }
 
         /* Edit modal */
@@ -398,6 +368,126 @@
             border-radius: 3px;
             font-size: 11px;
         }
+
+        /* Verification Panel */
+        .verification-panel {
+            background: #0f3460;
+            border-top: 2px solid #e94560;
+            padding: 15px;
+            display: none;
+        }
+
+        .verification-panel.active {
+            display: block;
+        }
+
+        .verification-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .verification-progress {
+            font-size: 14px;
+            color: #888;
+        }
+
+        .verification-progress .current {
+            color: #e94560;
+            font-weight: 600;
+        }
+
+        .field-label {
+            display: inline-block;
+            background: #e94560;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .verification-input-container {
+            margin-bottom: 12px;
+        }
+
+        .verification-input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #1a4a7a;
+            border-radius: 6px;
+            background: #1a1a2e;
+            color: #eee;
+            font-size: 16px;
+            transition: border-color 0.2s;
+        }
+
+        .verification-input:focus {
+            outline: none;
+            border-color: #e94560;
+        }
+
+        .verification-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .verification-actions .btn {
+            min-width: 120px;
+        }
+
+        .verification-shortcuts {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .verification-shortcuts kbd {
+            background: #1a1a2e;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+        }
+
+        /* Start verification button in header */
+        .btn-verify {
+            background: #16a34a;
+            color: white;
+        }
+
+        .btn-verify:hover {
+            background: #22c55e;
+        }
+
+        .btn-verify.active {
+            background: #dc2626;
+        }
+
+        .btn-verify.active:hover {
+            background: #ef4444;
+        }
+
+        .btn-export {
+            background: #2563eb;
+            color: white;
+        }
+
+        .btn-export:hover {
+            background: #3b82f6;
+        }
+
+        .btn-exit {
+            background: #6b7280;
+            color: white;
+        }
+
+        .btn-exit:hover {
+            background: #4b5563;
+        }
     </style>
 </head>
 <body>
@@ -408,8 +498,11 @@
             <span><span id="product-count">{{ total_products }}</span> products</span>
         </div>
         <div class="header-actions">
+            <button class="btn btn-verify" id="verify-btn" onclick="toggleVerificationMode()">Start Verification</button>
             <button class="btn btn-secondary" onclick="addProduct()">+ Add Product</button>
             <button class="btn btn-primary" onclick="saveSession()">Save</button>
+            <button class="btn btn-export" onclick="exportCSV()">Update CSV</button>
+            <button class="btn btn-exit" onclick="exitVerifier()">Exit</button>
         </div>
     </div>
 
@@ -437,16 +530,9 @@
             <div class="pdf-container" id="pdf-container">
                 <div class="pdf-wrapper" id="pdf-wrapper">
                     <img class="pdf-image" id="pdf-image" src="" alt="PDF Page">
-                    <canvas class="selection-canvas" id="selection-canvas"></canvas>
                 </div>
             </div>
-            <div class="selection-info" id="selection-info">
-                <strong>Selection:</strong> Draw a box on the PDF to extract text
-                <div class="selection-text" id="selection-text" style="display: none;"></div>
-            </div>
             <div class="instructions">
-                <kbd>Click + Drag</kbd> to select region &nbsp;|&nbsp;
-                <kbd>Esc</kbd> to clear selection &nbsp;|&nbsp;
                 <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate pages
             </div>
         </div>
@@ -459,6 +545,30 @@
             </div>
             <div class="products-container" id="products-container">
                 <!-- Products will be loaded here -->
+            </div>
+            <!-- Verification Panel -->
+            <div class="verification-panel" id="verification-panel">
+                <div class="verification-header">
+                    <span class="field-label" id="field-label">Item #</span>
+                    <div class="verification-progress">
+                        <span>Field <span class="current" id="field-progress">1/5</span></span>
+                        <span style="margin-left: 15px;">Product <span class="current" id="product-progress">1/28</span></span>
+                    </div>
+                </div>
+                <div class="verification-input-container">
+                    <input type="text" class="verification-input" id="verification-input" placeholder="Field value...">
+                </div>
+                <div class="verification-actions">
+                    <button class="btn btn-secondary" onclick="prevField()">&larr; Prev</button>
+                    <button class="btn btn-secondary" onclick="skipField()">Skip</button>
+                    <button class="btn btn-primary" onclick="confirmField()">Confirm &rarr;</button>
+                </div>
+                <div class="verification-shortcuts">
+                    <kbd>Enter</kbd> Confirm &nbsp;|&nbsp;
+                    <kbd>Tab</kbd> Skip &nbsp;|&nbsp;
+                    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> Navigate &nbsp;|&nbsp;
+                    <kbd>Esc</kbd> Exit
+                </div>
             </div>
         </div>
     </div>
@@ -507,22 +617,36 @@
         let currentZoom = 2.0;
         let products = [];
         let selectedProductId = null;
+        let hasUnsavedChanges = false;
 
-        // Selection state
-        let isSelecting = false;
-        let selectionStart = null;
-        let selectionRect = null;
+        // Warn before leaving with unsaved changes
+        window.addEventListener('beforeunload', (e) => {
+            if (hasUnsavedChanges) {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+
+        // Verification mode state
+        let verificationMode = false;
+        let currentProductIndex = 0;
+        let currentFieldIndex = 0;
+        const VERIFICATION_FIELDS = ['item_no', 'product_name', 'description', 'pkg', 'uom'];
+        const FIELD_LABELS = {
+            'item_no': 'Item #',
+            'product_name': 'Product Name',
+            'description': 'Description',
+            'pkg': 'Package',
+            'uom': 'UOM'
+        };
 
         // DOM elements
         const pdfImage = document.getElementById('pdf-image');
-        const canvas = document.getElementById('selection-canvas');
-        const ctx = canvas.getContext('2d');
         const productsContainer = document.getElementById('products-container');
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             loadPage(1);
-            setupCanvasEvents();
             setupKeyboardShortcuts();
         });
 
@@ -545,16 +669,17 @@
                 };
             }).catch(() => {});
 
-            // Resize canvas to match image
-            canvas.width = pdfImage.naturalWidth;
-            canvas.height = pdfImage.naturalHeight;
-            clearSelection();
-
             // Load products
-            const response = await fetch(`/api/page/${pageNum}`);
-            const data = await response.json();
-            products = data.products;
-            renderProducts();
+            try {
+                const response = await fetch(`/api/page/${pageNum}`);
+                const data = await response.json();
+                products = data.products;
+                renderProducts();
+            } catch (err) {
+                showToast('Failed to load products', 'error');
+                products = [];
+                renderProducts();
+            }
         }
 
         function goToPage(pageNum) {
@@ -621,133 +746,6 @@
             renderProducts();
         }
 
-        // Canvas events for selection
-        function setupCanvasEvents() {
-            canvas.addEventListener('mousedown', (e) => {
-                const rect = canvas.getBoundingClientRect();
-                const scaleX = canvas.width / rect.width;
-                const scaleY = canvas.height / rect.height;
-
-                isSelecting = true;
-                selectionStart = {
-                    x: (e.clientX - rect.left) * scaleX,
-                    y: (e.clientY - rect.top) * scaleY
-                };
-                selectionRect = null;
-            });
-
-            canvas.addEventListener('mousemove', (e) => {
-                if (!isSelecting) return;
-
-                const rect = canvas.getBoundingClientRect();
-                const scaleX = canvas.width / rect.width;
-                const scaleY = canvas.height / rect.height;
-
-                const currentX = (e.clientX - rect.left) * scaleX;
-                const currentY = (e.clientY - rect.top) * scaleY;
-
-                selectionRect = {
-                    x: Math.min(selectionStart.x, currentX),
-                    y: Math.min(selectionStart.y, currentY),
-                    width: Math.abs(currentX - selectionStart.x),
-                    height: Math.abs(currentY - selectionStart.y)
-                };
-
-                drawSelection();
-            });
-
-            canvas.addEventListener('mouseup', async () => {
-                if (!isSelecting || !selectionRect) return;
-                isSelecting = false;
-
-                if (selectionRect.width > 10 && selectionRect.height > 10) {
-                    await extractTextFromSelection();
-                }
-            });
-
-            canvas.addEventListener('mouseleave', () => {
-                if (isSelecting) {
-                    isSelecting = false;
-                }
-            });
-        }
-
-        function drawSelection() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-            if (selectionRect) {
-                // Semi-transparent fill
-                ctx.fillStyle = 'rgba(233, 69, 96, 0.2)';
-                ctx.fillRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
-
-                // Border
-                ctx.strokeStyle = '#e94560';
-                ctx.lineWidth = 2;
-                ctx.setLineDash([5, 5]);
-                ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
-                ctx.setLineDash([]);
-            }
-        }
-
-        function clearSelection() {
-            selectionRect = null;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            document.getElementById('selection-info').classList.remove('has-selection');
-            document.getElementById('selection-text').style.display = 'none';
-        }
-
-        async function extractTextFromSelection() {
-            if (!selectionRect) return;
-
-            const response = await fetch('/api/extract-text', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    page_number: currentPage,
-                    zoom: currentZoom,
-                    x0: selectionRect.x,
-                    y0: selectionRect.y,
-                    x1: selectionRect.x + selectionRect.width,
-                    y1: selectionRect.y + selectionRect.height
-                })
-            });
-
-            const data = await response.json();
-
-            if (data.success && data.text) {
-                document.getElementById('selection-info').classList.add('has-selection');
-                const textDiv = document.getElementById('selection-text');
-                textDiv.style.display = 'block';
-                textDiv.textContent = data.text;
-
-                // Auto-fill the add product modal
-                if (selectedProductId !== null) {
-                    // If a product is selected, offer to update it
-                    if (confirm('Apply this text to the selected product\'s name?')) {
-                        await updateProductField(selectedProductId, 'product_name', data.text);
-                    }
-                }
-            } else {
-                showToast('No text found in selection', 'error');
-            }
-        }
-
-        // Keyboard shortcuts
-        function setupKeyboardShortcuts() {
-            document.addEventListener('keydown', (e) => {
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-                if (e.key === 'ArrowLeft') {
-                    goToPage(currentPage - 1);
-                } else if (e.key === 'ArrowRight') {
-                    goToPage(currentPage + 1);
-                } else if (e.key === 'Escape') {
-                    clearSelection();
-                    closeModal();
-                }
-            });
-        }
-
         // Product CRUD
         function editProduct(id) {
             const product = products.find(p => p.id === id);
@@ -773,12 +771,6 @@
             document.getElementById('edit-pkg').value = '';
             document.getElementById('edit-uom').value = '';
 
-            // Pre-fill with selected text if available
-            const selectionText = document.getElementById('selection-text').textContent;
-            if (selectionText) {
-                document.getElementById('edit-product-name').value = selectionText;
-            }
-
             document.getElementById('edit-modal').classList.add('show');
         }
 
@@ -797,48 +789,58 @@
                 page_number: currentPage
             };
 
-            let response;
-            if (!id) {
-                // Add new product
-                response = await fetch('/api/product', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-            } else {
-                // Update existing product
-                response = await fetch(`/api/product/${id}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-            }
+            try {
+                let response;
+                if (!id) {
+                    // Add new product
+                    response = await fetch('/api/product', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                } else {
+                    // Update existing product
+                    response = await fetch(`/api/product/${id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                }
 
-            const result = await response.json();
-            if (result.success) {
-                showToast(!id ? 'Product added' : 'Product updated', 'success');
-                closeModal();
-                loadPage(currentPage);
-                updateProductCount();
-            } else {
-                showToast('Error saving product', 'error');
+                const result = await response.json();
+                if (result.success) {
+                    hasUnsavedChanges = true;
+                    showToast(!id ? 'Product added' : 'Product updated', 'success');
+                    closeModal();
+                    loadPage(currentPage);
+                    updateProductCount();
+                } else {
+                    showToast('Error saving product', 'error');
+                }
+            } catch (err) {
+                showToast('Network error saving product', 'error');
             }
         }
 
         async function deleteProduct(id) {
             if (!confirm('Delete this product?')) return;
 
-            const response = await fetch(`/api/product/${id}`, {
-                method: 'DELETE'
-            });
+            try {
+                const response = await fetch(`/api/product/${id}`, {
+                    method: 'DELETE'
+                });
 
-            const result = await response.json();
-            if (result.success) {
-                showToast('Product deleted', 'success');
-                loadPage(currentPage);
-                updateProductCount();
-            } else {
-                showToast('Error deleting product', 'error');
+                const result = await response.json();
+                if (result.success) {
+                    hasUnsavedChanges = true;
+                    showToast('Product deleted', 'success');
+                    loadPage(currentPage);
+                    updateProductCount();
+                } else {
+                    showToast('Error deleting product', 'error');
+                }
+            } catch (err) {
+                showToast('Network error deleting product', 'error');
             }
         }
 
@@ -846,37 +848,102 @@
             const data = {};
             data[field] = value;
 
-            const response = await fetch(`/api/product/${id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            });
+            try {
+                const response = await fetch(`/api/product/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
 
-            const result = await response.json();
-            if (result.success) {
-                showToast('Product updated', 'success');
-                loadPage(currentPage);
+                const result = await response.json();
+                if (result.success) {
+                    hasUnsavedChanges = true;
+                    showToast('Product updated', 'success');
+                    loadPage(currentPage);
+                } else {
+                    showToast('Error updating product', 'error');
+                }
+            } catch (err) {
+                showToast('Network error updating product', 'error');
             }
         }
 
         async function saveSession() {
-            const response = await fetch('/api/save', {
-                method: 'POST'
-            });
+            try {
+                const response = await fetch('/api/save', {
+                    method: 'POST'
+                });
 
-            const result = await response.json();
-            if (result.success) {
-                showToast(`Saved ${result.products_count} products`, 'success');
-            } else {
-                showToast('Error saving session', 'error');
+                const result = await response.json();
+                if (result.success) {
+                    hasUnsavedChanges = false;
+                    showToast(`Saved ${result.products_count} products`, 'success');
+                } else {
+                    showToast('Error saving session', 'error');
+                }
+            } catch (err) {
+                showToast('Network error saving session', 'error');
             }
+        }
+
+        async function exportCSV() {
+            try {
+                const response = await fetch('/api/export-csv', {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    showToast(`Exported ${result.products_count} products to CSV`, 'success');
+                } else {
+                    showToast('Error exporting CSV', 'error');
+                }
+            } catch (err) {
+                showToast('Network error exporting CSV', 'error');
+            }
+        }
+
+        async function exitVerifier() {
+            if (hasUnsavedChanges) {
+                const action = confirm(
+                    'You have unsaved changes.\n\n' +
+                    'Click OK to save and exit, or Cancel to go back.'
+                );
+                if (action) {
+                    // Save first, then exit
+                    await saveSession();
+                } else {
+                    return;
+                }
+            }
+
+            // Shutdown the server
+            try {
+                await fetch('/api/shutdown', { method: 'POST' });
+            } catch (err) {
+                // Server might close before responding, that's OK
+            }
+
+            // Show exit message
+            document.body.innerHTML = `
+                <div style="display: flex; justify-content: center; align-items: center; height: 100vh; background: #1a1a2e; color: #eee; font-family: sans-serif;">
+                    <div style="text-align: center;">
+                        <h1 style="margin-bottom: 20px;">Session Closed</h1>
+                        <p>You can close this browser tab.</p>
+                    </div>
+                </div>
+            `;
         }
 
         async function updateProductCount() {
             // Fetch total count from session stats
-            const response = await fetch('/api/stats');
-            const data = await response.json();
-            document.getElementById('product-count').textContent = data.total_products;
+            try {
+                const response = await fetch('/api/stats');
+                const data = await response.json();
+                document.getElementById('product-count').textContent = data.total_products;
+            } catch (err) {
+                // Silently fail - product count update is not critical
+            }
         }
 
         // Utilities
@@ -894,6 +961,193 @@
             setTimeout(() => {
                 toast.classList.remove('show');
             }, 3000);
+        }
+
+        // ============================================
+        // Verification Mode Functions
+        // ============================================
+
+        function toggleVerificationMode() {
+            verificationMode = !verificationMode;
+            const btn = document.getElementById('verify-btn');
+            const panel = document.getElementById('verification-panel');
+
+            if (verificationMode) {
+                if (products.length === 0) {
+                    showToast('No products on this page to verify', 'error');
+                    verificationMode = false;
+                    return;
+                }
+                btn.textContent = 'Exit Verification';
+                btn.classList.add('active');
+                panel.classList.add('active');
+                currentProductIndex = 0;
+                currentFieldIndex = 0;
+                showCurrentField();
+            } else {
+                btn.textContent = 'Start Verification';
+                btn.classList.remove('active');
+                panel.classList.remove('active');
+            }
+        }
+
+        function showCurrentField() {
+            if (!verificationMode || products.length === 0) return;
+
+            const product = products[currentProductIndex];
+            const fieldName = VERIFICATION_FIELDS[currentFieldIndex];
+            const fieldValue = product[fieldName] || '';
+
+            // Update UI
+            document.getElementById('field-label').textContent = FIELD_LABELS[fieldName];
+            document.getElementById('field-progress').textContent =
+                `${currentFieldIndex + 1}/${VERIFICATION_FIELDS.length}`;
+            document.getElementById('product-progress').textContent =
+                `${currentProductIndex + 1}/${products.length}`;
+
+            // Set input value
+            const input = document.getElementById('verification-input');
+            input.value = fieldValue;
+            input.focus();
+            input.select();
+
+            // Highlight the product card
+            selectProduct(product.id);
+        }
+
+        function nextField() {
+            if (!verificationMode) return;
+
+            currentFieldIndex++;
+            if (currentFieldIndex >= VERIFICATION_FIELDS.length) {
+                // Move to next product
+                currentFieldIndex = 0;
+                currentProductIndex++;
+                if (currentProductIndex >= products.length) {
+                    // End of products on this page
+                    showToast('Verification complete for this page!', 'success');
+                    toggleVerificationMode();
+                    return;
+                }
+            }
+            showCurrentField();
+        }
+
+        function prevField() {
+            if (!verificationMode) return;
+
+            currentFieldIndex--;
+            if (currentFieldIndex < 0) {
+                // Move to previous product
+                currentFieldIndex = VERIFICATION_FIELDS.length - 1;
+                currentProductIndex--;
+                if (currentProductIndex < 0) {
+                    currentProductIndex = 0;
+                    currentFieldIndex = 0;
+                }
+            }
+            showCurrentField();
+        }
+
+        async function confirmField() {
+            if (!verificationMode || products.length === 0) return;
+
+            const product = products[currentProductIndex];
+            const fieldName = VERIFICATION_FIELDS[currentFieldIndex];
+            const input = document.getElementById('verification-input');
+            const newValue = input.value;
+
+            // Only update if value changed
+            if (newValue !== (product[fieldName] || '')) {
+                const data = {};
+                data[fieldName] = newValue;
+
+                try {
+                    const response = await fetch(`/api/product/${product.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+
+                    const result = await response.json();
+                    if (result.success) {
+                        hasUnsavedChanges = true;
+                        // Update local product data
+                        product[fieldName] = newValue;
+                        renderProducts();
+                    } else {
+                        showToast('Error updating field', 'error');
+                    }
+                } catch (err) {
+                    showToast('Network error updating field', 'error');
+                }
+            }
+
+            // Move to next field
+            nextField();
+        }
+
+        function skipField() {
+            if (!verificationMode) return;
+            nextField();
+        }
+
+        // Override keyboard shortcuts for verification mode
+        function setupKeyboardShortcuts() {
+            document.addEventListener('keydown', (e) => {
+                // Always allow Escape to exit verification mode or close modal
+                if (e.key === 'Escape') {
+                    if (verificationMode) {
+                        toggleVerificationMode();
+                        return;
+                    }
+                    closeModal();
+                    return;
+                }
+
+                // In verification mode with focus on verification input
+                if (verificationMode && e.target.id === 'verification-input') {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        confirmField();
+                    } else if (e.key === 'Tab') {
+                        e.preventDefault();
+                        skipField();
+                    } else if (e.key === 'ArrowLeft' && e.ctrlKey) {
+                        e.preventDefault();
+                        prevField();
+                    } else if (e.key === 'ArrowRight' && e.ctrlKey) {
+                        e.preventDefault();
+                        nextField();
+                    }
+                    return;
+                }
+
+                // Skip if in other input fields
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+                // Verification mode shortcuts
+                if (verificationMode) {
+                    if (e.key === 'ArrowLeft') {
+                        prevField();
+                    } else if (e.key === 'ArrowRight') {
+                        nextField();
+                    } else if (e.key === 'Enter') {
+                        confirmField();
+                    } else if (e.key === 'Tab') {
+                        e.preventDefault();
+                        skipField();
+                    }
+                    return;
+                }
+
+                // Normal mode shortcuts
+                if (e.key === 'ArrowLeft') {
+                    goToPage(currentPage - 1);
+                } else if (e.key === 'ArrowRight') {
+                    goToPage(currentPage + 1);
+                }
+            });
         }
     </script>
 </body>

@@ -7,7 +7,8 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from flask import Flask, render_template, jsonify, request, send_file
 
-from .data_model import Product, ExtractionSession
+from .data_model import Product, ExtractionSession, FieldLocation
+from .exporter import export_to_csv
 
 # Flask app - static_folder=None since we don't have static files
 app = Flask(__name__, template_folder='templates', static_folder=None)
@@ -62,18 +63,23 @@ def get_page(page_num: int):
         return jsonify({'error': 'Invalid page number'}), 400
 
     # Get products for this page (use stable product IDs, not list indices)
-    products = [
-        {
-            'id': p.id,
-            'product_name': p.product_name,
-            'description': p.description,
-            'item_no': p.item_no,
-            'pkg': p.pkg,
-            'uom': p.uom,
-        }
-        for p in session.products
-        if p.page_number == page_num
-    ]
+    products = []
+    for p in session.products:
+        if p.page_number == page_num:
+            product_data = {
+                'id': p.id,
+                'product_name': p.product_name,
+                'description': p.description,
+                'item_no': p.item_no,
+                'pkg': p.pkg,
+                'uom': p.uom,
+            }
+            # Include field_locations if present
+            if p.field_locations:
+                product_data['field_locations'] = {
+                    k: v.to_dict() for k, v in p.field_locations.items()
+                }
+            products.append(product_data)
 
     return jsonify({
         'page_number': page_num,
@@ -145,6 +151,11 @@ def update_product(product_id: str):
     if 'uom' in data:
         product.uom = data['uom']
 
+    # Update field locations if provided
+    if 'field_locations' in data and data['field_locations']:
+        for field_name, loc_data in data['field_locations'].items():
+            product.field_locations[field_name] = FieldLocation.from_dict(loc_data)
+
     return jsonify({'success': True, 'product': product.to_dict()})
 
 
@@ -201,6 +212,28 @@ def save_session():
     return jsonify({'success': True, 'products_count': len(session.products)})
 
 
+@app.route('/api/export-csv', methods=['POST'])
+def export_csv():
+    """Export session to CSV file."""
+    session = _state['session']
+    session_dir = _state['session_dir']
+
+    # Save session first to ensure latest changes are persisted
+    session.save(session_dir)
+
+    # Export to CSV (extractions directory is sibling to sessions)
+    extractions_dir = session_dir.parent / 'extractions'
+    extractions_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = export_to_csv(session, extractions_dir)
+
+    return jsonify({
+        'success': True,
+        'csv_path': str(csv_path),
+        'products_count': len(session.products)
+    })
+
+
 @app.route('/api/stats')
 def get_stats():
     """Get session statistics including total product count."""
@@ -211,6 +244,32 @@ def get_stats():
         'total_pages': session.total_pages,
         'source_file': session.source_file,
     })
+
+
+@app.route('/api/shutdown', methods=['POST'])
+def shutdown():
+    """Shutdown the server gracefully."""
+    session = _state['session']
+    session_dir = _state['session_dir']
+
+    # Save session before shutdown
+    session.save(session_dir)
+
+    # Schedule shutdown
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func:
+        func()
+    else:
+        # For newer versions of werkzeug, use os._exit
+        import threading
+        import os
+        def shutdown_server():
+            import time
+            time.sleep(0.5)
+            os._exit(0)
+        threading.Thread(target=shutdown_server).start()
+
+    return jsonify({'success': True, 'message': 'Server shutting down'})
 
 
 @app.route('/api/extract-text', methods=['POST'])
