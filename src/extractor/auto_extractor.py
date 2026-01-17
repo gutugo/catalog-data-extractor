@@ -2,14 +2,21 @@
 
 import re
 from pathlib import Path
+from collections import defaultdict
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .data_model import Product, ExtractionSession, PageContent, FieldLocation
-from .pdf_reader import PDFReader
+from .pdf_reader import PDFReader, CAMELOT_AVAILABLE
 
 console = Console()
+
+# Confidence scores for different extraction methods
+CONFIDENCE_CAMELOT = 1.0
+CONFIDENCE_PDFPLUMBER = 0.95
+CONFIDENCE_PDFMINER = 0.8
+CONFIDENCE_REGEX = 0.5
 
 # Patterns for identifying valid item numbers
 ITEM_NO_PATTERN = re.compile(r'^(\d{4,5})$')
@@ -364,9 +371,10 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
 class AutoExtractor:
     """Handles automatic extraction from catalogs using table-aware parsing."""
 
-    def __init__(self, pdf_path: Path, session_dir: Path):
+    def __init__(self, pdf_path: Path, session_dir: Path, multi_method: bool = False):
         self.pdf_path = Path(pdf_path)
         self.session_dir = session_dir
+        self.multi_method = multi_method
         self.fallback_pages: list[int] = []  # Track pages that needed text fallback
 
     def run(self, progress_callback=None, show_console=True) -> ExtractionSession:
@@ -379,7 +387,10 @@ class AutoExtractor:
                          Set to False when running in background.
         """
         if show_console:
-            console.print(f"[bold blue]Auto-extracting:[/bold blue] {self.pdf_path.name}")
+            mode = "[cyan](multi-method)[/cyan] " if self.multi_method else ""
+            console.print(f"[bold blue]Auto-extracting:[/bold blue] {mode}{self.pdf_path.name}")
+            if self.multi_method and not CAMELOT_AVAILABLE:
+                console.print("[yellow]Note: Camelot not available (install ghostscript). Using pdfplumber + pdfminer.[/yellow]")
 
         with PDFReader(self.pdf_path) as reader:
             session = ExtractionSession(
@@ -435,6 +446,10 @@ class AutoExtractor:
 
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract products from a single page, preferring table extraction."""
+        # Use multi-method extraction if enabled
+        if self.multi_method:
+            return self._extract_page_multi(reader, page_num)
+
         # Try table extraction with positions first
         tables_with_positions = reader.extract_tables_with_positions(page_num)
 
@@ -453,3 +468,198 @@ class AutoExtractor:
         self.fallback_pages.append(page_num)
         page_content = reader.get_page(page_num)
         return extract_products_from_text_fallback(page_content, self.pdf_path.name)
+
+    def _extract_page_multi(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Extract using multiple methods and merge best results."""
+        all_products = []
+
+        # 1. Try Camelot first (best table accuracy)
+        camelot_products = self._try_camelot(reader, page_num)
+        all_products.append(camelot_products)
+
+        # 2. Try pdfplumber tables (current method)
+        pdfplumber_products = self._try_pdfplumber_tables(reader, page_num)
+        all_products.append(pdfplumber_products)
+
+        # 3. Try pdfminer.six text layout
+        layout_products = self._try_pdfminer_layout(reader, page_num)
+        all_products.append(layout_products)
+
+        # 4. Merge results - pick best confidence per product
+        merged = self._merge_extractions(*all_products)
+
+        # If no products found, track as fallback page
+        if not merged:
+            self.fallback_pages.append(page_num)
+
+        return merged
+
+    def _try_camelot(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using Camelot."""
+        if not CAMELOT_AVAILABLE:
+            return []
+
+        tables = reader.extract_tables_camelot(page_num)
+        products = []
+
+        for table_data in tables:
+            extracted = extract_products_from_table(
+                table_data['rows'], page_num, self.pdf_path.name
+            )
+            # Update confidence to Camelot level
+            for product in extracted:
+                for field_name, location in product.field_locations.items():
+                    location.confidence = CONFIDENCE_CAMELOT
+            products.extend(extracted)
+
+        return products
+
+    def _try_pdfplumber_tables(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using pdfplumber tables."""
+        tables = reader.extract_tables_with_positions(page_num)
+        products = []
+
+        for table_data in tables:
+            extracted = extract_products_from_table(
+                table_data['rows'], page_num, self.pdf_path.name
+            )
+            # Update confidence to pdfplumber level
+            for product in extracted:
+                for field_name, location in product.field_locations.items():
+                    location.confidence = CONFIDENCE_PDFPLUMBER
+            products.extend(extracted)
+
+        return products
+
+    def _try_pdfminer_layout(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using pdfminer.six layout analysis."""
+        text_blocks = reader.extract_text_with_layout(page_num)
+
+        # Convert text blocks to lines for regex extraction
+        all_lines = []
+        line_positions = {}  # Map line text to bbox
+
+        for block in text_blocks:
+            for line_data in block.get('lines', []):
+                line_text = line_data['text']
+                all_lines.append(line_text)
+                line_positions[line_text] = line_data['bbox']
+
+        # Create a synthetic PageContent for the fallback extractor
+        page_content = PageContent(
+            page_number=page_num,
+            lines=all_lines,
+            raw_text='\n'.join(all_lines)
+        )
+
+        products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+
+        # Update confidence and try to add positions from pdfminer
+        for product in products:
+            # Set base confidence for pdfminer extraction
+            for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
+                if field_name not in product.field_locations:
+                    product.field_locations[field_name] = FieldLocation(
+                        x0=0, y0=0, x1=0, y1=0,
+                        page_number=page_num,
+                        confidence=CONFIDENCE_PDFMINER
+                    )
+                else:
+                    product.field_locations[field_name].confidence = CONFIDENCE_PDFMINER
+
+        return products
+
+    def _merge_extractions(self, *product_lists: list[Product]) -> list[Product]:
+        """Merge products from multiple extractors.
+
+        Strategy:
+        - Match products by item_no
+        - For each field, pick highest confidence value
+        - Combine field_locations from best sources
+        """
+        # Group products by item_no
+        by_item_no: dict[str, list[Product]] = defaultdict(list)
+
+        for product_list in product_lists:
+            for product in product_list:
+                if product.item_no:
+                    by_item_no[product.item_no].append(product)
+
+        merged_products = []
+
+        for item_no, products in by_item_no.items():
+            if len(products) == 1:
+                # Only one extraction found this product
+                merged_products.append(products[0])
+                continue
+
+            # Multiple extractions - merge them
+            merged = self._merge_product_variants(products)
+            merged_products.append(merged)
+
+        return merged_products
+
+    def _merge_product_variants(self, products: list[Product]) -> Product:
+        """Merge multiple extractions of the same product."""
+        if not products:
+            raise ValueError("Cannot merge empty product list")
+
+        # Start with the first product as base
+        base = products[0]
+
+        # For product_name: pick longest non-empty value (captures full name)
+        best_name = base.product_name
+        for p in products[1:]:
+            if p.product_name and len(p.product_name) > len(best_name):
+                best_name = p.product_name
+
+        # For other fields: pick from highest confidence source
+        def get_field_confidence(product: Product, field: str) -> float:
+            loc = product.field_locations.get(field)
+            return loc.confidence if loc else 0.0
+
+        # Find best description
+        best_desc = base.description
+        best_desc_conf = get_field_confidence(base, 'description')
+        for p in products[1:]:
+            conf = get_field_confidence(p, 'description')
+            if conf > best_desc_conf and p.description:
+                best_desc = p.description
+                best_desc_conf = conf
+
+        # Find best pkg
+        best_pkg = base.pkg
+        best_pkg_conf = get_field_confidence(base, 'pkg')
+        for p in products[1:]:
+            conf = get_field_confidence(p, 'pkg')
+            if conf > best_pkg_conf and p.pkg:
+                best_pkg = p.pkg
+                best_pkg_conf = conf
+
+        # Find best uom
+        best_uom = base.uom
+        best_uom_conf = get_field_confidence(base, 'uom')
+        for p in products[1:]:
+            conf = get_field_confidence(p, 'uom')
+            if conf > best_uom_conf and p.uom:
+                best_uom = p.uom
+                best_uom_conf = conf
+
+        # Merge field_locations - keep highest confidence per field
+        merged_locations = {}
+        for p in products:
+            for field, loc in p.field_locations.items():
+                existing = merged_locations.get(field)
+                if not existing or loc.confidence > existing.confidence:
+                    merged_locations[field] = loc
+
+        return Product(
+            product_name=best_name,
+            description=best_desc,
+            item_no=base.item_no,
+            pkg=best_pkg,
+            uom=best_uom,
+            page_number=base.page_number,
+            source_file=base.source_file,
+            field_locations=merged_locations,
+        )

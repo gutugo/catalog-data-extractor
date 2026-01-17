@@ -239,6 +239,11 @@ def auto(
         dir_okay=False,
         resolve_path=True,
     ),
+    multi_method: bool = typer.Option(
+        False,
+        "--multi", "-m",
+        help="Use multiple extraction methods for best accuracy (slower, requires ghostscript for Camelot)",
+    ),
 ) -> None:
     """Auto-extract products from a PDF catalog."""
     ensure_directories()
@@ -247,7 +252,7 @@ def auto(
         console.print(f"[red]Error:[/red] {pdf_path} is not a PDF file")
         raise typer.Exit(1)
 
-    extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
+    extractor = AutoExtractor(pdf_path, SESSIONS_DIR, multi_method=multi_method)
     session = extractor.run()
 
     display_extraction_summary(session)

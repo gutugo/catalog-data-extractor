@@ -10,6 +10,7 @@ dependencies = [
     "pandas>=2.0.0",
     "flask>=3.0.0",
     "pymupdf>=1.23.0",
+    "camelot-py>=0.11.0",  # Table extraction (requires ghostscript)
 ]
 
 [project.scripts]
