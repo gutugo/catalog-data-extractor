@@ -369,9 +369,17 @@ class AutoExtractor:
         self.session_dir = session_dir
         self.fallback_pages: list[int] = []  # Track pages that needed text fallback
 
-    def run(self) -> ExtractionSession:
-        """Run automatic extraction on all pages."""
-        console.print(f"[bold blue]Auto-extracting:[/bold blue] {self.pdf_path.name}")
+    def run(self, progress_callback=None, show_console=True) -> ExtractionSession:
+        """Run automatic extraction on all pages.
+
+        Args:
+            progress_callback: Optional callback function(page_num, total_pages, products_count)
+                              Called after each page is processed.
+            show_console: Whether to show console output (default True).
+                         Set to False when running in background.
+        """
+        if show_console:
+            console.print(f"[bold blue]Auto-extracting:[/bold blue] {self.pdf_path.name}")
 
         with PDFReader(self.pdf_path) as reader:
             session = ExtractionSession(
@@ -380,32 +388,48 @@ class AutoExtractor:
                 current_page=1,
             )
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Processing pages...", total=reader.total_pages)
+            if show_console:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("Processing pages...", total=reader.total_pages)
 
+                    for page_num in range(1, reader.total_pages + 1):
+                        products = self._extract_page(reader, page_num)
+                        for product in products:
+                            session.add_product(product)
+
+                        session.current_page = page_num
+                        progress.update(task, advance=1)
+
+                        if progress_callback:
+                            progress_callback(page_num, reader.total_pages, len(session.products))
+            else:
+                # Silent mode for background extraction
                 for page_num in range(1, reader.total_pages + 1):
                     products = self._extract_page(reader, page_num)
                     for product in products:
                         session.add_product(product)
 
                     session.current_page = page_num
-                    progress.update(task, advance=1)
+
+                    if progress_callback:
+                        progress_callback(page_num, reader.total_pages, len(session.products))
 
             session.completed = True
             session.save(self.session_dir)
 
-            console.print(f"[green]Extracted {len(session.products)} products from {reader.total_pages} pages[/green]")
+            if show_console:
+                console.print(f"[green]Extracted {len(session.products)} products from {reader.total_pages} pages[/green]")
 
-            if self.fallback_pages:
-                console.print(f"[yellow]Note: {len(self.fallback_pages)} pages used text fallback (no tables found)[/yellow]")
-                if len(self.fallback_pages) <= 10:
-                    console.print(f"[dim]Fallback pages: {self.fallback_pages}[/dim]")
+                if self.fallback_pages:
+                    console.print(f"[yellow]Note: {len(self.fallback_pages)} pages used text fallback (no tables found)[/yellow]")
+                    if len(self.fallback_pages) <= 10:
+                        console.print(f"[dim]Fallback pages: {self.fallback_pages}[/dim]")
 
         return session
 

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verify: {{ catalog_name }}</title>
+    <title>{% if catalog_name %}Verify: {{ catalog_name }}{% else %}Catalog Data Extractor{% endif %}</title>
     <style>
         * {
             margin: 0;
@@ -74,11 +74,196 @@
             background: #1a4a7a;
         }
 
-        /* Main container */
+        /* Main container - three column layout */
         .main-container {
             flex: 1;
             display: flex;
             overflow: hidden;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 240px;
+            background: #0d0d1a;
+            border-right: 1px solid #0f3460;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .sidebar-header {
+            padding: 15px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .sidebar-header h2 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .sidebar-section {
+            padding: 15px;
+        }
+
+        /* Upload zone */
+        .upload-zone {
+            border: 2px dashed #0f3460;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .upload-zone:hover {
+            border-color: #1a4a7a;
+            background: rgba(15, 52, 96, 0.2);
+        }
+
+        .upload-zone.dragover {
+            border-color: #e94560;
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        .upload-zone p {
+            color: #666;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .upload-zone .upload-icon {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+
+        /* Catalog list */
+        .catalog-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .catalog-item {
+            padding: 12px;
+            margin-bottom: 8px;
+            background: #16213e;
+            border-radius: 6px;
+            border: 1px solid #0f3460;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .catalog-item:hover {
+            border-color: #1a4a7a;
+        }
+
+        .catalog-item.active {
+            border-color: #e94560;
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        .catalog-item-name {
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 6px;
+            word-break: break-word;
+        }
+
+        .catalog-item-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            color: #666;
+        }
+
+        .catalog-status {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-uploaded {
+            background: #4b5563;
+            color: #d1d5db;
+        }
+
+        .status-extracting {
+            background: #d97706;
+            color: #fef3c7;
+        }
+
+        .status-ready {
+            background: #059669;
+            color: #d1fae5;
+        }
+
+        .status-exported {
+            background: #2563eb;
+            color: #dbeafe;
+        }
+
+        .status-error {
+            background: #dc2626;
+            color: #fee2e2;
+        }
+
+        .catalog-item-actions {
+            display: flex;
+            gap: 5px;
+            margin-top: 8px;
+        }
+
+        .catalog-item-actions button {
+            padding: 4px 8px;
+            font-size: 11px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn-extract {
+            background: #d97706;
+            color: white;
+        }
+
+        .btn-extract:hover {
+            background: #f59e0b;
+        }
+
+        .btn-view {
+            background: #0f3460;
+            color: white;
+        }
+
+        .btn-view:hover {
+            background: #1a4a7a;
+        }
+
+        .progress-bar {
+            height: 4px;
+            background: #0f3460;
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: #d97706;
+            transition: width 0.3s;
+        }
+
+        .empty-catalogs {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 13px;
         }
 
         /* Left panel - PDF viewer */
@@ -88,6 +273,10 @@
             flex-direction: column;
             border-right: 1px solid #0f3460;
             min-width: 0;
+        }
+
+        .pdf-panel.hidden {
+            display: none;
         }
 
         .panel-header {
@@ -128,6 +317,10 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
+        }
+
+        .data-panel.hidden {
+            display: none;
         }
 
         .products-container {
@@ -488,27 +681,83 @@
         .btn-exit:hover {
             background: #4b5563;
         }
+
+        /* Dashboard welcome screen */
+        .welcome-screen {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            color: #666;
+            padding: 40px;
+        }
+
+        .welcome-screen h2 {
+            font-size: 24px;
+            color: #888;
+            margin-bottom: 15px;
+        }
+
+        .welcome-screen p {
+            font-size: 14px;
+            line-height: 1.6;
+            max-width: 400px;
+        }
+
+        .welcome-screen .arrow {
+            font-size: 48px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>{{ catalog_name }}</h1>
-        <div class="header-info">
-            <span>{{ total_pages }} pages</span>
+        <h1 id="header-title">{% if catalog_name %}{{ catalog_name }}{% else %}Catalog Data Extractor{% endif %}</h1>
+        <div class="header-info" id="header-info">
+            {% if catalog_name %}
+            <span><span id="total-pages">{{ total_pages }}</span> pages</span>
             <span><span id="product-count">{{ total_products }}</span> products</span>
+            {% endif %}
         </div>
-        <div class="header-actions">
+        <div class="header-actions" id="header-actions">
+            {% if catalog_name %}
             <button class="btn btn-verify" id="verify-btn" onclick="toggleVerificationMode()">Start Verification</button>
             <button class="btn btn-secondary" onclick="addProduct()">+ Add Product</button>
             <button class="btn btn-primary" onclick="saveSession()">Save</button>
             <button class="btn btn-export" onclick="exportCSV()">Update CSV</button>
+            {% endif %}
             <button class="btn btn-exit" onclick="exitVerifier()">Exit</button>
         </div>
     </div>
 
     <div class="main-container">
+        <!-- Sidebar -->
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>Catalogs</h2>
+            </div>
+
+            <!-- Upload Zone -->
+            <div class="sidebar-section">
+                <div class="upload-zone" id="upload-zone">
+                    <input type="file" id="file-input" accept=".pdf" hidden>
+                    <div class="upload-icon">+</div>
+                    <p>Drop PDF here<br>or click to upload</p>
+                </div>
+            </div>
+
+            <!-- Catalog List -->
+            <div class="sidebar-section catalog-list" id="catalog-list">
+                <!-- Dynamically populated -->
+            </div>
+        </div>
+
+        {% if catalog_name %}
         <!-- Left panel: PDF viewer -->
-        <div class="pdf-panel">
+        <div class="pdf-panel" id="pdf-panel">
             <div class="panel-header">
                 <span class="panel-title">PDF Page</span>
                 <div class="nav-controls">
@@ -517,7 +766,7 @@
                         <input type="number" id="page-input" min="1" max="{{ total_pages }}" value="1"
                                style="width: 50px; text-align: center; background: #0f3460; border: none; color: white; padding: 4px; border-radius: 3px;"
                                onchange="goToPage(parseInt(this.value))">
-                        / {{ total_pages }}
+                        / <span id="max-pages">{{ total_pages }}</span>
                     </span>
                     <button class="nav-btn" id="next-btn" onclick="goToPage(currentPage + 1)">Next &rarr;</button>
                 </div>
@@ -538,7 +787,7 @@
         </div>
 
         <!-- Right panel: Extracted data -->
-        <div class="data-panel">
+        <div class="data-panel" id="data-panel">
             <div class="panel-header">
                 <span class="panel-title">Extracted Products</span>
                 <span id="page-product-count" style="font-size: 12px; color: #888;">0 products on this page</span>
@@ -571,6 +820,16 @@
                 </div>
             </div>
         </div>
+        {% else %}
+        <!-- Dashboard welcome screen -->
+        <div class="welcome-screen" id="welcome-screen">
+            <div class="arrow">&larr;</div>
+            <h2>Welcome</h2>
+            <p>
+                Upload a PDF catalog using the sidebar, or select an existing catalog to view and verify extracted products.
+            </p>
+        </div>
+        {% endif %}
     </div>
 
     <!-- Edit modal -->
@@ -618,6 +877,9 @@
         let products = [];
         let selectedProductId = null;
         let hasUnsavedChanges = false;
+        let dashboardMode = {{ 'true' if dashboard_mode else 'false' }};
+        let activeCatalog = {{ ('"%s"' % catalog_name) if catalog_name else 'null' | safe }};
+        let catalogs = [];
 
         // Warn before leaving with unsaved changes
         window.addEventListener('beforeunload', (e) => {
@@ -646,18 +908,362 @@
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            loadPage(1);
+            setupUploadZone();
+            loadCatalogs();
+            if (!dashboardMode && totalPages > 0) {
+                loadPage(1);
+            }
             setupKeyboardShortcuts();
         });
 
+        // ============================================
+        // Sidebar: Upload and Catalog Management
+        // ============================================
+
+        function setupUploadZone() {
+            const uploadZone = document.getElementById('upload-zone');
+            const fileInput = document.getElementById('file-input');
+
+            // Click to upload
+            uploadZone.addEventListener('click', () => fileInput.click());
+
+            // File selected
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    uploadFile(e.target.files[0]);
+                }
+            });
+
+            // Drag and drop
+            uploadZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                uploadZone.classList.add('dragover');
+            });
+
+            uploadZone.addEventListener('dragleave', () => {
+                uploadZone.classList.remove('dragover');
+            });
+
+            uploadZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadZone.classList.remove('dragover');
+                if (e.dataTransfer.files.length > 0) {
+                    const file = e.dataTransfer.files[0];
+                    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+                        uploadFile(file);
+                    } else {
+                        showToast('Please upload a PDF file', 'error');
+                    }
+                }
+            });
+        }
+
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                showToast('Uploading...', 'success');
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    showToast(`Uploaded: ${result.filename}`, 'success');
+                    loadCatalogs();
+                } else {
+                    showToast(result.error || 'Upload failed', 'error');
+                }
+            } catch (err) {
+                showToast('Network error uploading file', 'error');
+            }
+        }
+
+        async function loadCatalogs() {
+            try {
+                const response = await fetch('/api/catalogs');
+                const data = await response.json();
+                catalogs = data.catalogs;
+                renderCatalogs();
+            } catch (err) {
+                console.error('Failed to load catalogs:', err);
+            }
+        }
+
+        function renderCatalogs() {
+            const container = document.getElementById('catalog-list');
+
+            if (catalogs.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-catalogs">
+                        No catalogs yet.<br>Upload a PDF to get started.
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = catalogs.map(c => {
+                const isActive = activeCatalog && (c.name === activeCatalog.replace('.pdf', '').replace('.PDF', ''));
+                const statusClass = `status-${c.status}`;
+
+                let actions = '';
+                if (c.status === 'uploaded') {
+                    actions = `<button class="btn-extract" onclick="event.stopPropagation(); startExtraction('${c.name}')">Extract</button>`;
+                } else if (c.status === 'extracting') {
+                    const progress = c.progress || { page: 0, total_pages: 0 };
+                    const pct = progress.total_pages > 0 ? (progress.page / progress.total_pages * 100) : 0;
+                    actions = `
+                        <div class="progress-bar">
+                            <div class="progress-bar-fill" style="width: ${pct}%"></div>
+                        </div>
+                    `;
+                } else if (c.status === 'ready' || c.status === 'exported' || c.status === 'completed') {
+                    actions = `<button class="btn-view" onclick="event.stopPropagation(); switchCatalog('${c.name}')">View</button>`;
+                }
+
+                let meta = '';
+                if (c.products_count > 0) {
+                    meta = `${c.products_count} products`;
+                } else if (c.pages > 0) {
+                    meta = `${c.pages} pages`;
+                }
+
+                return `
+                    <div class="catalog-item ${isActive ? 'active' : ''}" data-name="${c.name}"
+                         onclick="switchCatalog('${c.name}')">
+                        <div class="catalog-item-name">${c.name}</div>
+                        <div class="catalog-item-meta">
+                            <span>${meta}</span>
+                            <span class="catalog-status ${statusClass}">${c.status}</span>
+                        </div>
+                        <div class="catalog-item-actions">
+                            ${actions}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function startExtraction(name) {
+            try {
+                const response = await fetch(`/api/extract/${name}`, {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    showToast('Extraction started', 'success');
+                    pollExtractionStatus(name);
+                } else {
+                    showToast(result.error || 'Failed to start extraction', 'error');
+                }
+            } catch (err) {
+                showToast('Network error starting extraction', 'error');
+            }
+        }
+
+        function pollExtractionStatus(name) {
+            const pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/extract/${name}/status`);
+                    const data = await response.json();
+
+                    // Update local catalog data
+                    const catalog = catalogs.find(c => c.name === name);
+                    if (catalog) {
+                        catalog.status = data.status;
+                        catalog.progress = data.progress;
+                        if (data.status === 'completed') {
+                            catalog.products_count = data.progress.products;
+                            catalog.status = 'ready';
+                        }
+                        renderCatalogs();
+                    }
+
+                    if (data.status === 'completed' || data.status === 'error') {
+                        clearInterval(pollInterval);
+                        if (data.status === 'completed') {
+                            showToast(`Extraction complete: ${data.progress.products} products`, 'success');
+                        } else {
+                            showToast(`Extraction failed: ${data.error}`, 'error');
+                        }
+                        loadCatalogs();
+                    }
+                } catch (err) {
+                    console.error('Error polling extraction status:', err);
+                }
+            }, 500);
+        }
+
+        async function switchCatalog(name) {
+            // Don't switch if already active
+            if (activeCatalog && name === activeCatalog.replace('.pdf', '').replace('.PDF', '')) {
+                return;
+            }
+
+            // Check for unsaved changes
+            if (hasUnsavedChanges) {
+                const confirm = window.confirm('You have unsaved changes. Save before switching?');
+                if (confirm) {
+                    await saveSession();
+                }
+            }
+
+            try {
+                const response = await fetch(`/api/switch/${name}`, {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    // Update state
+                    activeCatalog = result.catalog_name;
+                    totalPages = result.total_pages;
+                    dashboardMode = false;
+                    hasUnsavedChanges = false;
+
+                    // Update UI
+                    document.getElementById('header-title').textContent = result.catalog_name;
+                    document.getElementById('header-info').innerHTML = `
+                        <span><span id="total-pages">${result.total_pages}</span> pages</span>
+                        <span><span id="product-count">${result.total_products}</span> products</span>
+                    `;
+
+                    // Show header actions if hidden
+                    const headerActions = document.getElementById('header-actions');
+                    if (!headerActions.querySelector('.btn-verify')) {
+                        headerActions.innerHTML = `
+                            <button class="btn btn-verify" id="verify-btn" onclick="toggleVerificationMode()">Start Verification</button>
+                            <button class="btn btn-secondary" onclick="addProduct()">+ Add Product</button>
+                            <button class="btn btn-primary" onclick="saveSession()">Save</button>
+                            <button class="btn btn-export" onclick="exportCSV()">Update CSV</button>
+                            <button class="btn btn-exit" onclick="exitVerifier()">Exit</button>
+                        `;
+                    }
+
+                    // Show panels, hide welcome screen
+                    const welcomeScreen = document.getElementById('welcome-screen');
+                    if (welcomeScreen) {
+                        welcomeScreen.remove();
+                    }
+
+                    // Create panels if they don't exist
+                    if (!document.getElementById('pdf-panel')) {
+                        createPanels(result.total_pages);
+                    } else {
+                        document.getElementById('pdf-panel').classList.remove('hidden');
+                        document.getElementById('data-panel').classList.remove('hidden');
+                        document.getElementById('max-pages').textContent = result.total_pages;
+                        document.getElementById('page-input').max = result.total_pages;
+                    }
+
+                    // Load first page
+                    currentPage = 1;
+                    loadPage(1);
+                    loadCatalogs();
+
+                    showToast(`Loaded: ${result.catalog_name}`, 'success');
+                } else {
+                    showToast(result.error || 'Failed to switch catalog', 'error');
+                }
+            } catch (err) {
+                showToast('Network error switching catalog', 'error');
+            }
+        }
+
+        function createPanels(maxPages) {
+            const mainContainer = document.querySelector('.main-container');
+
+            // Create PDF panel
+            const pdfPanel = document.createElement('div');
+            pdfPanel.className = 'pdf-panel';
+            pdfPanel.id = 'pdf-panel';
+            pdfPanel.innerHTML = `
+                <div class="panel-header">
+                    <span class="panel-title">PDF Page</span>
+                    <div class="nav-controls">
+                        <button class="nav-btn" id="prev-btn" onclick="goToPage(currentPage - 1)">&larr; Prev</button>
+                        <span class="page-indicator">
+                            <input type="number" id="page-input" min="1" max="${maxPages}" value="1"
+                                   style="width: 50px; text-align: center; background: #0f3460; border: none; color: white; padding: 4px; border-radius: 3px;"
+                                   onchange="goToPage(parseInt(this.value))">
+                            / <span id="max-pages">${maxPages}</span>
+                        </span>
+                        <button class="nav-btn" id="next-btn" onclick="goToPage(currentPage + 1)">Next &rarr;</button>
+                    </div>
+                    <div class="zoom-controls">
+                        <span style="font-size: 12px;">Zoom:</span>
+                        <input type="range" id="zoom-slider" min="1" max="4" step="0.5" value="2" onchange="changeZoom(this.value)">
+                        <span id="zoom-value" style="font-size: 12px;">2x</span>
+                    </div>
+                </div>
+                <div class="pdf-container" id="pdf-container">
+                    <div class="pdf-wrapper" id="pdf-wrapper">
+                        <img class="pdf-image" id="pdf-image" src="" alt="PDF Page">
+                    </div>
+                </div>
+                <div class="instructions">
+                    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate pages
+                </div>
+            `;
+
+            // Create data panel
+            const dataPanel = document.createElement('div');
+            dataPanel.className = 'data-panel';
+            dataPanel.id = 'data-panel';
+            dataPanel.innerHTML = `
+                <div class="panel-header">
+                    <span class="panel-title">Extracted Products</span>
+                    <span id="page-product-count" style="font-size: 12px; color: #888;">0 products on this page</span>
+                </div>
+                <div class="products-container" id="products-container">
+                </div>
+                <div class="verification-panel" id="verification-panel">
+                    <div class="verification-header">
+                        <span class="field-label" id="field-label">Item #</span>
+                        <div class="verification-progress">
+                            <span>Field <span class="current" id="field-progress">1/5</span></span>
+                            <span style="margin-left: 15px;">Product <span class="current" id="product-progress">1/28</span></span>
+                        </div>
+                    </div>
+                    <div class="verification-input-container">
+                        <input type="text" class="verification-input" id="verification-input" placeholder="Field value...">
+                    </div>
+                    <div class="verification-actions">
+                        <button class="btn btn-secondary" onclick="prevField()">&larr; Prev</button>
+                        <button class="btn btn-secondary" onclick="skipField()">Skip</button>
+                        <button class="btn btn-primary" onclick="confirmField()">Confirm &rarr;</button>
+                    </div>
+                    <div class="verification-shortcuts">
+                        <kbd>Enter</kbd> Confirm &nbsp;|&nbsp;
+                        <kbd>Tab</kbd> Skip &nbsp;|&nbsp;
+                        <kbd>&larr;</kbd> <kbd>&rarr;</kbd> Navigate &nbsp;|&nbsp;
+                        <kbd>Esc</kbd> Exit
+                    </div>
+                </div>
+            `;
+
+            mainContainer.appendChild(pdfPanel);
+            mainContainer.appendChild(dataPanel);
+        }
+
+        // ============================================
+        // Page Loading and Navigation
+        // ============================================
+
         // Load a page
         async function loadPage(pageNum) {
+            if (dashboardMode) return;
+
             currentPage = pageNum;
             document.getElementById('page-input').value = pageNum;
             document.getElementById('prev-btn').disabled = pageNum <= 1;
             document.getElementById('next-btn').disabled = pageNum >= totalPages;
 
             // Load image
+            const pdfImage = document.getElementById('pdf-image');
             pdfImage.src = `/api/page/${pageNum}/image?zoom=${currentZoom}`;
 
             // Wait for image to load (with error handling)
@@ -696,11 +1302,12 @@
 
         // Render products list
         function renderProducts() {
+            const container = document.getElementById('products-container');
             document.getElementById('page-product-count').textContent =
                 `${products.length} product${products.length !== 1 ? 's' : ''} on this page`;
 
             if (products.length === 0) {
-                productsContainer.innerHTML = `
+                container.innerHTML = `
                     <div style="text-align: center; padding: 40px; color: #666;">
                         <p>No products extracted from this page</p>
                         <p style="margin-top: 10px; font-size: 13px;">
@@ -712,7 +1319,7 @@
                 return;
             }
 
-            productsContainer.innerHTML = products.map((p, i) => `
+            container.innerHTML = products.map((p, i) => `
                 <div class="product-card ${selectedProductId === p.id ? 'selected' : ''}"
                      data-id="${p.id}" onclick="selectProduct('${p.id}')">
                     <div class="product-header">
@@ -763,6 +1370,11 @@
         }
 
         function addProduct() {
+            if (dashboardMode) {
+                showToast('Select a catalog first', 'error');
+                return;
+            }
+
             document.getElementById('modal-title').textContent = 'Add Product';
             document.getElementById('edit-id').value = '';
             document.getElementById('edit-product-name').value = '';
@@ -869,6 +1481,8 @@
         }
 
         async function saveSession() {
+            if (dashboardMode) return;
+
             try {
                 const response = await fetch('/api/save', {
                     method: 'POST'
@@ -887,6 +1501,8 @@
         }
 
         async function exportCSV() {
+            if (dashboardMode) return;
+
             try {
                 const response = await fetch('/api/export-csv', {
                     method: 'POST'
@@ -895,6 +1511,7 @@
                 const result = await response.json();
                 if (result.success) {
                     showToast(`Exported ${result.products_count} products to CSV`, 'success');
+                    loadCatalogs(); // Refresh to show exported status
                 } else {
                     showToast('Error exporting CSV', 'error');
                 }
@@ -940,7 +1557,10 @@
             try {
                 const response = await fetch('/api/stats');
                 const data = await response.json();
-                document.getElementById('product-count').textContent = data.total_products;
+                const countEl = document.getElementById('product-count');
+                if (countEl) {
+                    countEl.textContent = data.total_products;
+                }
             } catch (err) {
                 // Silently fail - product count update is not critical
             }
@@ -968,6 +1588,8 @@
         // ============================================
 
         function toggleVerificationMode() {
+            if (dashboardMode) return;
+
             verificationMode = !verificationMode;
             const btn = document.getElementById('verify-btn');
             const panel = document.getElementById('verification-panel');
@@ -1142,10 +1764,12 @@
                 }
 
                 // Normal mode shortcuts
-                if (e.key === 'ArrowLeft') {
-                    goToPage(currentPage - 1);
-                } else if (e.key === 'ArrowRight') {
-                    goToPage(currentPage + 1);
+                if (!dashboardMode) {
+                    if (e.key === 'ArrowLeft') {
+                        goToPage(currentPage - 1);
+                    } else if (e.key === 'ArrowRight') {
+                        goToPage(currentPage + 1);
+                    }
                 }
             });
         }

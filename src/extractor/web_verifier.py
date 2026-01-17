@@ -2,10 +2,12 @@
 
 import atexit
 import io
+import threading
 from pathlib import Path
 
 import fitz  # PyMuPDF
 from flask import Flask, render_template, jsonify, request, send_file
+from werkzeug.utils import secure_filename
 
 from .data_model import Product, ExtractionSession, FieldLocation
 from .exporter import export_to_csv
@@ -13,13 +15,22 @@ from .exporter import export_to_csv
 # Flask app - static_folder=None since we don't have static files
 app = Flask(__name__, template_folder='templates', static_folder=None)
 
+# Configuration
+CATALOGS_DIR = Path.cwd() / "catalogs"
+SESSIONS_DIR = Path.cwd() / "processed" / "sessions"
+EXTRACTIONS_DIR = Path.cwd() / "processed" / "extractions"
+
 # Global state (set when launching)
 _state: dict = {
     'pdf_path': None,
     'session': None,
     'session_dir': None,
     'pdf_doc': None,
+    'dashboard_mode': False,  # True when no catalog is loaded initially
 }
+
+# Background extraction jobs: {catalog_name: {'status': str, 'progress': dict, 'error': str}}
+_extraction_jobs: dict = {}
 
 
 def cleanup_pdf():
@@ -29,12 +40,93 @@ def cleanup_pdf():
         _state['pdf_doc'] = None
 
 
-def init_app(pdf_path: Path, session: ExtractionSession, session_dir: Path) -> Flask:
-    """Initialize the Flask app with PDF and session data."""
-    _state['pdf_path'] = pdf_path
-    _state['session'] = session
-    _state['session_dir'] = session_dir
-    _state['pdf_doc'] = fitz.open(pdf_path)
+def list_catalogs() -> list[dict]:
+    """List all catalogs with their status.
+
+    Returns list of dicts with keys: name, status, products_count, pages
+    Status can be: 'uploaded', 'extracting', 'ready', 'exported'
+    """
+    catalogs = []
+
+    # Ensure directories exist
+    CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    EXTRACTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Find all PDFs in catalogs directory
+    pdf_files = set()
+    for pdf in CATALOGS_DIR.glob("*.pdf"):
+        pdf_files.add(pdf.stem)
+    for pdf in CATALOGS_DIR.glob("*.PDF"):
+        pdf_files.add(pdf.stem)
+
+    # Find all sessions
+    sessions = {}
+    for session_file in SESSIONS_DIR.glob("*.session.json"):
+        name = session_file.stem.replace('.session', '')
+        sessions[name] = session_file
+
+    # Find all exports
+    exports = set()
+    for csv_file in EXTRACTIONS_DIR.glob("*.csv"):
+        exports.add(csv_file.stem)
+
+    # Combine into catalog list
+    all_names = pdf_files | set(sessions.keys())
+
+    for name in sorted(all_names):
+        catalog = {
+            'name': name,
+            'has_pdf': name in pdf_files,
+            'products_count': 0,
+            'pages': 0,
+            'status': 'uploaded',
+        }
+
+        # Check if currently extracting
+        if name in _extraction_jobs:
+            job = _extraction_jobs[name]
+            catalog['status'] = job['status']
+            if job.get('progress'):
+                catalog['progress'] = job['progress']
+            if job.get('error'):
+                catalog['error'] = job['error']
+        # Check if has session
+        elif name in sessions:
+            session = ExtractionSession.load(sessions[name])
+            if session:
+                catalog['products_count'] = len(session.products)
+                catalog['pages'] = session.total_pages
+                catalog['status'] = 'exported' if name in exports else 'ready'
+        # Otherwise just uploaded PDF
+        elif name in pdf_files:
+            catalog['status'] = 'uploaded'
+
+        catalogs.append(catalog)
+
+    return catalogs
+
+
+def init_app(pdf_path: Path = None, session: ExtractionSession = None,
+             session_dir: Path = None, dashboard_mode: bool = False) -> Flask:
+    """Initialize the Flask app with PDF and session data.
+
+    Can be called with no arguments for dashboard mode, or with
+    pdf_path, session, and session_dir for catalog-specific mode.
+    """
+    _state['dashboard_mode'] = dashboard_mode
+    _state['session_dir'] = session_dir or SESSIONS_DIR
+
+    if pdf_path and session:
+        _state['pdf_path'] = pdf_path
+        _state['session'] = session
+        _state['pdf_doc'] = fitz.open(pdf_path)
+        _state['dashboard_mode'] = False
+    else:
+        _state['pdf_path'] = None
+        _state['session'] = None
+        _state['pdf_doc'] = None
+        _state['dashboard_mode'] = True
 
     # Register cleanup on exit
     atexit.register(cleanup_pdf)
@@ -46,18 +138,210 @@ def init_app(pdf_path: Path, session: ExtractionSession, session_dir: Path) -> F
 def index():
     """Main verification page."""
     session = _state['session']
+
+    if _state['dashboard_mode'] or session is None:
+        # Dashboard mode - no catalog loaded
+        return render_template(
+            'verify.html',
+            catalog_name=None,
+            total_pages=0,
+            total_products=0,
+            dashboard_mode=True,
+        )
+
     return render_template(
         'verify.html',
         catalog_name=session.source_file,
         total_pages=session.total_pages,
         total_products=len(session.products),
+        dashboard_mode=False,
     )
 
+
+# ============================================
+# Catalog Management API
+# ============================================
+
+@app.route('/api/catalogs')
+def get_catalogs():
+    """List all catalogs with status."""
+    catalogs = list_catalogs()
+    return jsonify({
+        'catalogs': catalogs,
+        'active': _state['session'].source_file if _state['session'] else None,
+    })
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_catalog():
+    """Upload a new PDF catalog."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Only PDF files are allowed'}), 400
+
+    # Secure the filename
+    filename = secure_filename(file.filename)
+    if not filename:
+        return jsonify({'error': 'Invalid filename'}), 400
+
+    # Ensure catalogs directory exists
+    CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Save the file
+    pdf_path = CATALOGS_DIR / filename
+    file.save(pdf_path)
+
+    # Get page count
+    try:
+        doc = fitz.open(pdf_path)
+        page_count = len(doc)
+        doc.close()
+    except Exception as e:
+        pdf_path.unlink()  # Remove invalid PDF
+        return jsonify({'error': f'Invalid PDF file: {e}'}), 400
+
+    return jsonify({
+        'success': True,
+        'name': pdf_path.stem,
+        'filename': filename,
+        'pages': page_count,
+    })
+
+
+@app.route('/api/extract/<catalog_name>', methods=['POST'])
+def start_extraction(catalog_name: str):
+    """Start auto-extraction for a catalog."""
+    # Check if already extracting
+    if catalog_name in _extraction_jobs and _extraction_jobs[catalog_name]['status'] == 'extracting':
+        return jsonify({'error': 'Extraction already in progress'}), 400
+
+    # Find the PDF
+    pdf_path = CATALOGS_DIR / f"{catalog_name}.pdf"
+    if not pdf_path.exists():
+        pdf_path = CATALOGS_DIR / f"{catalog_name}.PDF"
+    if not pdf_path.exists():
+        return jsonify({'error': 'PDF not found'}), 404
+
+    # Initialize job status
+    _extraction_jobs[catalog_name] = {
+        'status': 'extracting',
+        'progress': {'page': 0, 'total_pages': 0, 'products': 0},
+        'error': None,
+    }
+
+    def progress_callback(page_num, total_pages, products_count):
+        _extraction_jobs[catalog_name]['progress'] = {
+            'page': page_num,
+            'total_pages': total_pages,
+            'products': products_count,
+        }
+
+    def run_extraction():
+        try:
+            from .auto_extractor import AutoExtractor
+
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
+            session = extractor.run(progress_callback=progress_callback, show_console=False)
+
+            _extraction_jobs[catalog_name]['status'] = 'completed'
+            _extraction_jobs[catalog_name]['progress']['products'] = len(session.products)
+        except Exception as e:
+            _extraction_jobs[catalog_name]['status'] = 'error'
+            _extraction_jobs[catalog_name]['error'] = str(e)
+
+    # Start extraction in background thread
+    thread = threading.Thread(target=run_extraction, daemon=True)
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': 'Extraction started',
+        'catalog': catalog_name,
+    })
+
+
+@app.route('/api/extract/<catalog_name>/status')
+def get_extraction_status(catalog_name: str):
+    """Get extraction progress for a catalog."""
+    if catalog_name not in _extraction_jobs:
+        # Check if session exists (already extracted)
+        session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
+        if session_path.exists():
+            session = ExtractionSession.load(session_path)
+            if session:
+                return jsonify({
+                    'status': 'completed',
+                    'progress': {
+                        'page': session.total_pages,
+                        'total_pages': session.total_pages,
+                        'products': len(session.products),
+                    },
+                })
+        return jsonify({'error': 'No extraction job found'}), 404
+
+    job = _extraction_jobs[catalog_name]
+    return jsonify({
+        'status': job['status'],
+        'progress': job['progress'],
+        'error': job.get('error'),
+    })
+
+
+@app.route('/api/switch/<catalog_name>', methods=['POST'])
+def switch_catalog(catalog_name: str):
+    """Switch to a different catalog."""
+    # Find session
+    session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
+    if not session_path.exists():
+        return jsonify({'error': 'Session not found. Extract the catalog first.'}), 404
+
+    session = ExtractionSession.load(session_path)
+    if not session:
+        return jsonify({'error': 'Failed to load session'}), 500
+
+    # Find PDF
+    pdf_path = CATALOGS_DIR / session.source_file
+    if not pdf_path.exists():
+        pdf_path = Path.cwd() / session.source_file
+    if not pdf_path.exists():
+        return jsonify({'error': f'PDF not found: {session.source_file}'}), 404
+
+    # Close current PDF if open
+    if _state['pdf_doc']:
+        _state['pdf_doc'].close()
+
+    # Load new catalog
+    _state['pdf_path'] = pdf_path
+    _state['session'] = session
+    _state['pdf_doc'] = fitz.open(pdf_path)
+    _state['dashboard_mode'] = False
+
+    return jsonify({
+        'success': True,
+        'catalog_name': session.source_file,
+        'total_pages': session.total_pages,
+        'total_products': len(session.products),
+    })
+
+
+# ============================================
+# Page and Product API
+# ============================================
 
 @app.route('/api/page/<int:page_num>')
 def get_page(page_num: int):
     """Get page data including image and extracted products."""
     session = _state['session']
+
+    if session is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
 
     if page_num < 1 or page_num > session.total_pages:
         return jsonify({'error': 'Invalid page number'}), 400
@@ -93,6 +377,9 @@ def get_page_image(page_num: int):
     """Get PDF page as PNG image."""
     session = _state['session']
     pdf_doc = _state['pdf_doc']
+
+    if session is None or pdf_doc is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
 
     if page_num < 1 or page_num > session.total_pages:
         return jsonify({'error': 'Invalid page number'}), 400
@@ -131,6 +418,9 @@ def update_product(product_id: str):
     """Update a product's data."""
     session = _state['session']
 
+    if session is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
+
     product, _ = _find_product_by_id(session, product_id)
     if product is None:
         return jsonify({'error': 'Product not found'}), 404
@@ -163,6 +453,10 @@ def update_product(product_id: str):
 def add_product():
     """Add a new product."""
     session = _state['session']
+
+    if session is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
+
     data = request.json
 
     if data is None:
@@ -192,6 +486,9 @@ def delete_product(product_id: str):
     """Delete a product."""
     session = _state['session']
 
+    if session is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
+
     product, index = _find_product_by_id(session, product_id)
     if product is None:
         return jsonify({'error': 'Product not found'}), 404
@@ -207,6 +504,9 @@ def save_session():
     session = _state['session']
     session_dir = _state['session_dir']
 
+    if session is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
+
     session.save(session_dir)
 
     return jsonify({'success': True, 'products_count': len(session.products)})
@@ -217,6 +517,9 @@ def export_csv():
     """Export session to CSV file."""
     session = _state['session']
     session_dir = _state['session_dir']
+
+    if session is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
 
     # Save session first to ensure latest changes are persisted
     session.save(session_dir)
@@ -239,10 +542,19 @@ def get_stats():
     """Get session statistics including total product count."""
     session = _state['session']
 
+    if session is None:
+        return jsonify({
+            'total_products': 0,
+            'total_pages': 0,
+            'source_file': None,
+            'dashboard_mode': True,
+        })
+
     return jsonify({
         'total_products': len(session.products),
         'total_pages': session.total_pages,
         'source_file': session.source_file,
+        'dashboard_mode': False,
     })
 
 
@@ -252,8 +564,9 @@ def shutdown():
     session = _state['session']
     session_dir = _state['session_dir']
 
-    # Save session before shutdown
-    session.save(session_dir)
+    # Save session before shutdown if one is loaded
+    if session and session_dir:
+        session.save(session_dir)
 
     # Schedule shutdown
     func = request.environ.get('werkzeug.server.shutdown')
@@ -261,7 +574,6 @@ def shutdown():
         func()
     else:
         # For newer versions of werkzeug, use os._exit
-        import threading
         import os
         def shutdown_server():
             import time
@@ -276,6 +588,10 @@ def shutdown():
 def extract_text_from_region():
     """Extract text from a selected region on a PDF page."""
     pdf_doc = _state['pdf_doc']
+
+    if pdf_doc is None:
+        return jsonify({'error': 'No catalog loaded'}), 400
+
     data = request.json
 
     if data is None:
@@ -303,12 +619,14 @@ def extract_text_from_region():
     })
 
 
-def run_server(pdf_path: Path, session: ExtractionSession, session_dir: Path,
-               host: str = '127.0.0.1', port: int = 5000, debug: bool = False):
+def run_server(pdf_path: Path = None, session: ExtractionSession = None,
+               session_dir: Path = None, host: str = '127.0.0.1', port: int = 5000,
+               debug: bool = False, dashboard_mode: bool = False):
     """Run the Flask development server."""
-    init_app(pdf_path, session, session_dir)
+    init_app(pdf_path, session, session_dir, dashboard_mode=dashboard_mode)
 
-    print(f"\n  Web Verifier running at: http://{host}:{port}")
+    mode = "Dashboard" if dashboard_mode or session is None else "Catalog"
+    print(f"\n  Web Verifier ({mode} mode) running at: http://{host}:{port}")
     print(f"  Press Ctrl+C to stop\n")
 
     app.run(host=host, port=port, debug=debug)

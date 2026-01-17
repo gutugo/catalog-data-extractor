@@ -305,9 +305,9 @@ def verify(
 
 @app.command("web-verify")
 def web_verify(
-    catalog_name: str = typer.Argument(
-        ...,
-        help="Name of the catalog to verify (without extension)",
+    catalog_name: Optional[str] = typer.Argument(
+        None,
+        help="Name of the catalog to verify (without extension). If not provided, opens in dashboard mode.",
     ),
     port: int = typer.Option(
         5000,
@@ -320,9 +320,43 @@ def web_verify(
         help="Host to bind the server to",
     ),
 ) -> None:
-    """Launch web-based verification UI in browser."""
+    """Launch web-based verification UI in browser.
+
+    If no catalog name is provided, opens in dashboard mode where you can
+    upload PDFs, run extractions, and switch between catalogs.
+    """
     ensure_directories()
 
+    # Import web_verifier lazily to avoid Flask dependency for other commands
+    try:
+        from .web_verifier import run_server as run_web_verifier
+    except ImportError as e:
+        console.print(f"[red]Error:[/red] Flask is required for web verification: {e}")
+        console.print("[dim]Install with: uv add flask pymupdf[/dim]")
+        raise typer.Exit(1)
+
+    # Dashboard mode - no catalog specified
+    if catalog_name is None:
+        console.print(Panel(
+            "[bold]Web Verification UI - Dashboard Mode[/bold]\n\n"
+            "Upload PDFs, run extractions, and manage catalogs.",
+            border_style="blue"
+        ))
+
+        # Open browser after a short delay
+        import webbrowser
+        import threading
+
+        def open_browser():
+            webbrowser.open(f"http://{host}:{port}")
+
+        threading.Timer(1.0, open_browser).start()
+
+        # Run the web server in dashboard mode
+        run_web_verifier(host=host, port=port, dashboard_mode=True)
+        return
+
+    # Catalog-specific mode
     session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
 
     if not session_path.exists():
@@ -351,14 +385,6 @@ def web_verify(
         f"Pages: {session.total_pages}",
         border_style="blue"
     ))
-
-    # Import web_verifier lazily to avoid Flask dependency for other commands
-    try:
-        from .web_verifier import run_server as run_web_verifier
-    except ImportError as e:
-        console.print(f"[red]Error:[/red] Flask is required for web verification: {e}")
-        console.print("[dim]Install with: uv add flask pymupdf[/dim]")
-        raise typer.Exit(1)
 
     # Open browser after a short delay to allow server to start
     import webbrowser

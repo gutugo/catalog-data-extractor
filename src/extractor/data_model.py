@@ -13,6 +13,41 @@ def _generate_id() -> str:
 
 
 @dataclass
+class FieldLocation:
+    """Represents the location of a field value on a PDF page."""
+
+    x0: float  # Left edge (PDF coordinates)
+    y0: float  # Top edge
+    x1: float  # Right edge
+    y1: float  # Bottom edge
+    page_number: int
+    confidence: float = 1.0  # 1.0 for table extraction, lower for text fallback
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            'x0': self.x0,
+            'y0': self.y0,
+            'x1': self.x1,
+            'y1': self.y1,
+            'page_number': self.page_number,
+            'confidence': self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FieldLocation":
+        """Create from dictionary."""
+        return cls(
+            x0=data.get('x0', 0),
+            y0=data.get('y0', 0),
+            x1=data.get('x1', 0),
+            y1=data.get('y1', 0),
+            page_number=data.get('page_number', 0),
+            confidence=data.get('confidence', 1.0),
+        )
+
+
+@dataclass
 class Product:
     """Represents an extracted product from a catalog."""
 
@@ -24,10 +59,25 @@ class Product:
     page_number: int = 0
     source_file: str = ""
     id: str = field(default_factory=_generate_id)
+    field_locations: dict[str, FieldLocation] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Convert product to dictionary."""
-        return asdict(self)
+        result = {
+            'product_name': self.product_name,
+            'description': self.description,
+            'item_no': self.item_no,
+            'pkg': self.pkg,
+            'uom': self.uom,
+            'page_number': self.page_number,
+            'source_file': self.source_file,
+            'id': self.id,
+        }
+        if self.field_locations:
+            result['field_locations'] = {
+                k: v.to_dict() for k, v in self.field_locations.items()
+            }
+        return result
 
     @classmethod
     def from_dict(cls, data: dict) -> "Product":
@@ -35,6 +85,11 @@ class Product:
 
         Only uses known fields, ignoring any extra keys in data.
         """
+        field_locations = {}
+        if 'field_locations' in data and data['field_locations']:
+            for field_name, loc_data in data['field_locations'].items():
+                field_locations[field_name] = FieldLocation.from_dict(loc_data)
+
         return cls(
             product_name=data.get("product_name", ""),
             description=data.get("description", ""),
@@ -44,6 +99,7 @@ class Product:
             page_number=data.get("page_number", 0),
             source_file=data.get("source_file", ""),
             id=data.get("id") or _generate_id(),
+            field_locations=field_locations,
         )
 
 
