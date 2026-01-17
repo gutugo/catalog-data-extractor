@@ -4,9 +4,11 @@ A Python CLI tool for semi-automatic extraction of product data from PDF supplie
 
 ## Features
 
-- **Auto-extraction** - Table-aware extraction using pdfplumber
+- **Auto-extraction** - Table-aware extraction using pdfplumber with field position tracking
 - **Web verification UI** - Browser-based split view with PDF and extracted data
-- **Region selection** - Draw boxes on PDF to extract text
+- **Field-by-field verification** - Cycle through each field for quick review
+- **One-click CSV export** - Update CSV directly from web UI
+- **Unsaved changes detection** - Warns before leaving with unsaved work
 - **Interactive mode** - Terminal-based line selection and field mapping
 - **Session persistence** - Quit and resume anytime
 - **CSV export** - Consistent column structure with pkg/uom parsing
@@ -52,13 +54,24 @@ uv run extractor web-verify CY2025-OTC-Catalog
 
 **Web UI Features:**
 - **Split view**: PDF page on left, extracted products on right
-- **Region selection**: Click and drag on PDF to draw selection boxes
-- **Text extraction**: Selected regions automatically extract text
+- **Field verification mode**: Click "Start Verification" to cycle through each field
+  - Edit field values inline, press Enter to confirm
+  - Tab to skip fields, Escape to exit verification
 - **Edit products**: Click any product to edit fields
 - **Add/Delete**: Add new products or remove incorrect ones
 - **Navigation**: Arrow keys or buttons to move between pages
 - **Zoom**: Adjust PDF zoom level (1x-4x)
 - **Save**: Persist changes to session
+- **Update CSV**: Export to CSV directly from web UI
+- **Exit**: Close session with unsaved changes check
+
+**Keyboard Shortcuts:**
+| Key | Action |
+|-----|--------|
+| Enter | Confirm field and go to next |
+| Tab | Skip field |
+| ← / → | Navigate pages (or fields in verification mode) |
+| Escape | Exit verification mode |
 
 ### 3. Export to CSV
 
@@ -152,16 +165,19 @@ catalogdataextractor/
 
 ## How Auto-Extraction Works
 
-1. **Table detection**: Uses pdfplumber's `extract_tables()` to find structured tables
+1. **Table detection**: Uses pdfplumber's `find_tables()` to find structured tables with cell positions
 2. **Column detection**: Dynamically identifies which column contains count data
 3. **Field parsing**: Extracts item_no, product_name, and count from table rows
-4. **Count parsing**: Parses "32 ct." into pkg=32, uom=ct
-5. **Fallback**: Uses regex-based extraction for pages without tables
+4. **Position tracking**: Stores bounding box coordinates for each extracted field
+5. **Count parsing**: Parses "32 ct." into pkg=32, uom=ct
+6. **Fallback**: Uses regex-based extraction for pages without tables (no position data)
 
 ## Tips
 
 - Use `auto` first, then `web-verify` to review and correct
+- Use "Start Verification" mode to quickly cycle through all fields
 - The web UI shows the actual PDF page, making it easy to compare
-- Draw selection boxes on the PDF to extract text into fields
+- Use "Update CSV" button to export changes without leaving the web UI
 - Sessions auto-save, so you can quit anytime and resume later
+- Use "Exit" button to safely close with unsaved changes check
 - Use `status` to see which catalogs are complete
