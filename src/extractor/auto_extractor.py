@@ -6,7 +6,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-from .data_model import Product, ExtractionSession, PageContent
+from .data_model import Product, ExtractionSession, PageContent, FieldLocation
 from .pdf_reader import PDFReader
 
 console = Console()
@@ -15,8 +15,29 @@ console = Console()
 ITEM_NO_PATTERN = re.compile(r'^(\d{4,5})$')
 
 # Patterns for parsing count/uom strings like "32 ct.", "100 pk", or "1,000 ct."
+# Note: UOM_UNITS is the single source of truth for unit patterns
+UOM_UNITS = r'ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit'
+
 COUNT_UOM_PATTERN = re.compile(
-    r'^([\d,]+)\s*(ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit)\.?$',
+    rf'^([\d,]+)\s*({UOM_UNITS})\.?$',
+    re.IGNORECASE
+)
+
+# Pattern for count column detection (unit is optional, for partial matches)
+COUNT_COLUMN_PATTERN = re.compile(
+    rf'^[\d,]+\s*({UOM_UNITS})?\.?$',
+    re.IGNORECASE
+)
+
+# Pattern for single-line product extraction: item_no, description, count, price
+PRODUCT_LINE_PATTERN = re.compile(
+    rf'^(\d{{4,5}})\s+(.+?)\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
+    re.IGNORECASE
+)
+
+# Pattern for item_no, count, price on one line (multi-line product name above)
+MULTILINE_ITEM_PATTERN = re.compile(
+    rf'^(\d{{4,5}})\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
     re.IGNORECASE
 )
 
@@ -102,8 +123,17 @@ def clean_product_name(name: str) -> str:
     return cleaned
 
 
-def find_count_column(table: list[list[str]]) -> int:
+def _get_cell_text(cell) -> str:
+    """Get text from a cell, handling both string and dict formats."""
+    if isinstance(cell, dict):
+        return (cell.get('text') or '').strip()
+    return (cell or '').strip()
+
+
+def find_count_column(table: list[list]) -> int:
     """Find which column contains count data (e.g., '32 ct.', '1 pk').
+
+    Works with both string lists and dict lists (with 'text' and 'bbox' keys).
 
     Returns the column index, or -1 if no valid count column found.
     """
@@ -123,13 +153,12 @@ def find_count_column(table: list[list[str]]) -> int:
         for row in table:
             if col_idx >= len(row):
                 continue
-            cell = (row[col_idx] or '').strip()
-            if not cell:
+            cell_text = _get_cell_text(row[col_idx])
+            if not cell_text:
                 continue
             total_cells += 1
             # Check if cell looks like a count (number + optional unit)
-            # Note: Keep in sync with COUNT_UOM_PATTERN (supports comma-formatted numbers like "1,000")
-            if re.match(r'^[\d,]+\s*(ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit)?\.?$', cell, re.IGNORECASE):
+            if COUNT_COLUMN_PATTERN.match(cell_text):
                 count_matches += 1
 
         # Need at least 50% match rate and at least 1 matching cell
@@ -144,20 +173,35 @@ def find_count_column(table: list[list[str]]) -> int:
     return best_col
 
 
-def extract_products_from_table(table: list[list[str]], page_number: int, source_file: str) -> list[Product]:
+def _get_cell_bbox(cell) -> tuple | None:
+    """Get bbox from a cell, handling both string and dict formats."""
+    if isinstance(cell, dict):
+        return cell.get('bbox')
+    return None
+
+
+def extract_products_from_table(table: list[list], page_number: int, source_file: str) -> list[Product]:
     """Extract products from a single table.
 
     Expected column format: Item # | Description | Count | Price
     But we handle variations and different column counts.
+
+    Works with both string lists and dict lists (with 'text' and 'bbox' keys).
     """
     products = []
 
     # Determine which column contains count data
     count_col = find_count_column(table)
 
+    # Convert row to string list for header/skip checks
+    def row_to_strings(row):
+        return [_get_cell_text(cell) for cell in row]
+
     for row in table:
+        row_strings = row_to_strings(row)
+
         # Skip header and footer rows
-        if is_header_row(row) or should_skip_row(row):
+        if is_header_row(row_strings) or should_skip_row(row_strings):
             continue
 
         # Need at least 2 columns for item_no and description
@@ -165,23 +209,62 @@ def extract_products_from_table(table: list[list[str]], page_number: int, source
             continue
 
         # Try to find item number in first column
-        item_no = (row[0] or '').strip()
+        item_no = _get_cell_text(row[0])
         if not is_valid_item_no(item_no):
             continue
 
         # Extract product name (column 2)
-        product_name = clean_product_name(row[1] if len(row) > 1 else '')
+        product_name = clean_product_name(_get_cell_text(row[1]) if len(row) > 1 else '')
         if not product_name:
             continue
 
         # Extract count/uom from detected count column
         count_str = ''
+        count_bbox = None
         if count_col >= 0 and count_col < len(row):
-            count_str = (row[count_col] or '').strip()
+            count_str = _get_cell_text(row[count_col])
+            count_bbox = _get_cell_bbox(row[count_col])
 
         pkg, uom = parse_count_uom(count_str)
 
-        # Create product (we don't use price column for now)
+        # Build field locations from bboxes
+        field_locations = {}
+
+        # Item number location (column 0)
+        item_bbox = _get_cell_bbox(row[0])
+        if item_bbox:
+            field_locations['item_no'] = FieldLocation(
+                x0=item_bbox[0], y0=item_bbox[1],
+                x1=item_bbox[2], y1=item_bbox[3],
+                page_number=page_number,
+                confidence=1.0
+            )
+
+        # Product name location (column 1)
+        name_bbox = _get_cell_bbox(row[1]) if len(row) > 1 else None
+        if name_bbox:
+            field_locations['product_name'] = FieldLocation(
+                x0=name_bbox[0], y0=name_bbox[1],
+                x1=name_bbox[2], y1=name_bbox[3],
+                page_number=page_number,
+                confidence=1.0
+            )
+
+        # Count/description location (same cell for pkg, uom, description)
+        if count_bbox:
+            count_location = FieldLocation(
+                x0=count_bbox[0], y0=count_bbox[1],
+                x1=count_bbox[2], y1=count_bbox[3],
+                page_number=page_number,
+                confidence=1.0
+            )
+            field_locations['description'] = count_location
+            if pkg:
+                field_locations['pkg'] = count_location
+            if uom:
+                field_locations['uom'] = count_location
+
+        # Create product
         products.append(Product(
             product_name=product_name,
             description=count_str,  # Keep original count string as description
@@ -190,6 +273,7 @@ def extract_products_from_table(table: list[list[str]], page_number: int, source
             uom=uom,
             page_number=page_number,
             source_file=source_file,
+            field_locations=field_locations,
         ))
 
     return products
@@ -199,23 +283,10 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
     """Fallback text-based extraction when no tables are found.
 
     Uses regex patterns to parse product lines from raw text.
+    Uses module-level PRODUCT_LINE_PATTERN and MULTILINE_ITEM_PATTERN.
     """
     products = []
     lines = page.lines
-
-    # Pattern: item_no at start, description, count, price at end
-    # Note: Keep unit list in sync with COUNT_UOM_PATTERN
-    PRODUCT_LINE_PATTERN = re.compile(
-        r'^(\d{4,5})\s+(.+?)\s+(\d+\s*(?:ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit)\.?)\s+\$(\d+\.?\d*)$',
-        re.IGNORECASE
-    )
-
-    # Pattern for item_no, count, price on one line (multi-line product name above)
-    # Note: Keep unit list in sync with COUNT_UOM_PATTERN
-    MULTILINE_ITEM_PATTERN = re.compile(
-        r'^(\d{4,5})\s+(\d+\s*(?:ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit)\.?)\s+\$(\d+\.?\d*)$',
-        re.IGNORECASE
-    )
 
     i = 0
     pending_description = []
@@ -340,14 +411,15 @@ class AutoExtractor:
 
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract products from a single page, preferring table extraction."""
-        # Try table extraction first
-        tables = reader.extract_tables(page_num)
+        # Try table extraction with positions first
+        tables_with_positions = reader.extract_tables_with_positions(page_num)
 
-        if tables:
+        if tables_with_positions:
             products = []
-            for table in tables:
+            for table_data in tables_with_positions:
+                # Convert to row format expected by extract_products_from_table
                 products.extend(extract_products_from_table(
-                    table, page_num, self.pdf_path.name
+                    table_data['rows'], page_num, self.pdf_path.name
                 ))
 
             if products:

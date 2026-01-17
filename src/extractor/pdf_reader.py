@@ -1,6 +1,8 @@
 """PDF text extraction using pdfplumber."""
 
+from itertools import zip_longest
 from pathlib import Path
+import sys
 from typing import Iterator, Optional
 
 import pdfplumber
@@ -47,7 +49,6 @@ class PDFReader:
             raw_text = page.extract_text() or ""
         except Exception as e:
             # Handle encrypted pages, malformed content, etc.
-            import sys
             print(f"Warning: Failed to extract text from page {page_number}: {e}", file=sys.stderr)
             raw_text = ""
 
@@ -86,7 +87,6 @@ class PDFReader:
             tables = page.extract_tables() or []
         except Exception as e:
             # Handle extraction failures gracefully
-            import sys
             print(f"Warning: Failed to extract tables from page {page_number}: {e}", file=sys.stderr)
             return []
 
@@ -102,6 +102,80 @@ class PDFReader:
                 cleaned_tables.append(cleaned_table)
 
         return cleaned_tables
+
+    def extract_tables_with_positions(self, page_number: int) -> list[dict]:
+        """Extract tables with cell bounding boxes for each cell.
+
+        Returns a list of table dicts, each containing:
+        - 'rows': list of rows, each row is a list of cell dicts with 'text' and 'bbox'
+        - 'bbox': bounding box of entire table
+
+        Args:
+            page_number: 1-indexed page number
+
+        Returns:
+            List of table dicts with position data
+        """
+        if not self._pdf:
+            raise RuntimeError("PDF not opened. Use context manager.")
+
+        if page_number < 1 or page_number > self.total_pages:
+            raise ValueError(f"Page {page_number} out of range (1-{self.total_pages})")
+
+        page = self._pdf.pages[page_number - 1]
+
+        try:
+            tables = page.find_tables()
+        except Exception as e:
+            print(f"Warning: Failed to find tables on page {page_number}: {e}", file=sys.stderr)
+            return []
+
+        result = []
+        for table in tables:
+            table_data = {
+                'bbox': table.bbox,  # (x0, y0, x1, y1)
+                'rows': []
+            }
+
+            # Get extracted text for all rows
+            extracted_rows = table.extract()
+
+            # Validate row counts match
+            if len(table.rows) != len(extracted_rows):
+                print(
+                    f"Warning: Row count mismatch on page {page_number}: "
+                    f"{len(table.rows)} row objects vs {len(extracted_rows)} text rows",
+                    file=sys.stderr
+                )
+
+            # Combine row bboxes with extracted text
+            # Use zip_longest to handle potential mismatches without data loss
+            for row_obj, row_text in zip_longest(table.rows, extracted_rows, fillvalue=None):
+                row_data = []
+                # Handle case where row_obj or row_text is None due to mismatch
+                cells = row_obj.cells if row_obj else []
+                texts = row_text if row_text else []
+
+                # Validate cell counts match
+                if cells and texts and len(cells) != len(texts):
+                    print(
+                        f"Warning: Cell count mismatch on page {page_number}: "
+                        f"{len(cells)} cell bboxes vs {len(texts)} text cells",
+                        file=sys.stderr
+                    )
+
+                # row_obj.cells contains bboxes for each cell in the row
+                # row_text contains the extracted text for each cell
+                for cell_bbox, cell_text in zip_longest(cells, texts, fillvalue=None):
+                    row_data.append({
+                        'text': cell_text.strip() if cell_text else '',
+                        'bbox': cell_bbox  # (x0, y0, x1, y1) or None
+                    })
+                table_data['rows'].append(row_data)
+
+            result.append(table_data)
+
+        return result
 
 
 def quick_page_count(pdf_path: Path) -> int:
