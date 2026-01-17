@@ -772,8 +772,8 @@
                 </div>
                 <div class="zoom-controls">
                     <span style="font-size: 12px;">Zoom:</span>
-                    <input type="range" id="zoom-slider" min="1" max="4" step="0.5" value="2" oninput="changeZoom(this.value)">
-                    <span id="zoom-value" style="font-size: 12px;">2x</span>
+                    <input type="range" id="zoom-slider" min="0.5" max="5" step="0.5" value="1.5" oninput="changeZoom(this.value)">
+                    <span id="zoom-value" style="font-size: 12px;">150%</span>
                 </div>
             </div>
             <div class="pdf-container" id="pdf-container">
@@ -873,7 +873,7 @@
         // State
         let currentPage = 1;
         let totalPages = {{ total_pages }};
-        let currentZoom = 2.0;
+        let currentZoom = 1.5;
         let products = [];
         let selectedProductId = null;
         let hasUnsavedChanges = false;
@@ -1195,8 +1195,8 @@
                     </div>
                     <div class="zoom-controls">
                         <span style="font-size: 12px;">Zoom:</span>
-                        <input type="range" id="zoom-slider" min="1" max="4" step="0.5" value="2" oninput="changeZoom(this.value)">
-                        <span id="zoom-value" style="font-size: 12px;">2x</span>
+                        <input type="range" id="zoom-slider" min="0.5" max="5" step="0.5" value="1.5" oninput="changeZoom(this.value)">
+                        <span id="zoom-value" style="font-size: 12px;">150%</span>
                     </div>
                 </div>
                 <div class="pdf-container" id="pdf-container">
@@ -1296,7 +1296,7 @@
 
         function changeZoom(value) {
             currentZoom = parseFloat(value);
-            document.getElementById('zoom-value').textContent = value + 'x';
+            document.getElementById('zoom-value').textContent = Math.round(currentZoom * 100) + '%';
             loadPage(currentPage);
         }
 
