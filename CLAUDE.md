@@ -13,7 +13,7 @@ catalogdataextractor/
 │   └── extractions/            # Output CSV files
 └── src/extractor/
     ├── cli.py                  # Typer CLI entry point
-    ├── pdf_reader.py           # PDF text/table extraction (pdfplumber)
+    ├── pdf_reader.py           # PDF text/table extraction (pdfplumber, camelot, pdfminer.six)
     ├── data_model.py           # Product, ExtractionSession, PageContent, FieldLocation
     ├── auto_extractor.py       # Table-aware automatic extraction
     ├── extractor.py            # Interactive extraction workflow
@@ -32,6 +32,9 @@ uv run extractor <command>
 
 # Auto-extract products (recommended first step)
 uv run extractor auto catalogs/<file>.pdf
+
+# Auto-extract with multi-method pipeline (higher accuracy, slower)
+uv run extractor auto catalogs/<file>.pdf --multi
 
 # Web-based verification UI (opens browser)
 uv run extractor web-verify <catalog-name>
@@ -100,6 +103,12 @@ CSV output columns:
 - `extract_tables_with_positions()` - Table extraction with cell bounding boxes
   - Returns list of table dicts with `rows` (list of cell dicts with `text` and `bbox`)
   - Uses pdfplumber's `table.rows` for cell positions and `table.extract()` for text
+- `extract_tables_camelot()` - Table extraction using Camelot (stream flavor)
+  - Higher accuracy for some PDFs, requires Ghostscript
+  - Returns same format as `extract_tables_with_positions()` for compatibility
+- `extract_text_with_layout()` - Text block extraction using pdfminer.six
+  - Returns text blocks with bounding boxes and individual lines
+  - Uses LAParams for layout analysis
 
 ### auto_extractor.py
 - `find_count_column()` - Dynamically detects which table column contains count data
@@ -111,6 +120,15 @@ CSV output columns:
   - Creates `FieldLocation` objects for each extracted field from cell bboxes
 - `extract_products_from_text_fallback()` - Regex fallback for non-table pages
 - UOM patterns are synchronized across all extraction methods (COUNT_UOM_PATTERN, PRODUCT_LINE_PATTERN, MULTILINE_ITEM_PATTERN, find_count_column)
+
+#### Multi-Method Extraction (`--multi` flag)
+When enabled, uses multiple extraction methods and merges results:
+- `_extract_page_multi()` - Orchestrates extraction from all methods
+- `_try_camelot()` - Camelot extraction (confidence: 1.0)
+- `_try_pdfplumber_tables()` - pdfplumber extraction (confidence: 0.95)
+- `_try_pdfminer_layout()` - pdfminer.six extraction (confidence: 0.8)
+- `_merge_extractions()` - Merges products by item_no, picks best fields by confidence
+- `_merge_product_variants()` - For same item_no: longest product_name, highest confidence for other fields
 
 ### web_verifier.py
 - Flask app with API endpoints for page images, products CRUD
@@ -140,12 +158,19 @@ CSV output columns:
 
 ## Dependencies
 
-- **pdfplumber** - PDF text/table extraction
+- **pdfplumber** - PDF text/table extraction (includes pdfminer.six)
+- **camelot-py** - High-accuracy table extraction (requires Ghostscript)
 - **pymupdf** - PDF page rendering to images
 - **flask** - Web verification UI
 - **rich** - Terminal formatting
 - **typer** - CLI framework
 - **pandas** - CSV export
+
+### System Dependencies
+- **Ghostscript** - Required for Camelot table extraction
+  - macOS: `brew install ghostscript`
+  - Ubuntu: `apt install ghostscript`
+  - Windows: Download from https://ghostscript.com/
 
 ## Development
 

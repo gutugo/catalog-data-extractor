@@ -5,6 +5,7 @@ A Python CLI tool for semi-automatic extraction of product data from PDF supplie
 ## Features
 
 - **Auto-extraction** - Table-aware extraction using pdfplumber with field position tracking
+- **Multi-method extraction** - Optional `--multi` flag uses Camelot + pdfplumber + pdfminer.six for best accuracy
 - **Web verification UI** - Browser-based split view with PDF and extracted data
 - **Field-by-field verification** - Cycle through each field for quick review
 - **One-click CSV export** - Update CSV directly from web UI
@@ -17,6 +18,7 @@ A Python CLI tool for semi-automatic extraction of product data from PDF supplie
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
+- [Ghostscript](https://ghostscript.com/) (optional, for `--multi` mode with Camelot)
 
 ## Installation
 
@@ -32,6 +34,17 @@ A Python CLI tool for semi-automatic extraction of product data from PDF supplie
    uv sync
    ```
 
+4. (Optional) Install Ghostscript for multi-method extraction:
+   ```bash
+   # macOS
+   brew install ghostscript
+
+   # Ubuntu/Debian
+   apt install ghostscript
+
+   # Windows: Download from https://ghostscript.com/
+   ```
+
 ## Quick Start (Recommended Workflow)
 
 ### 1. Auto-Extract Products
@@ -43,6 +56,14 @@ uv run extractor auto catalogs/CY2025-OTC-Catalog.pdf
 ```
 
 This uses table-aware extraction to identify product rows and parse fields automatically.
+
+For higher accuracy on complex PDFs, use multi-method extraction:
+
+```bash
+uv run extractor auto catalogs/CY2025-OTC-Catalog.pdf --multi
+```
+
+Multi-method mode uses Camelot, pdfplumber, and pdfminer.six, then merges results by confidence score.
 
 ### 2. Verify with Web UI
 
@@ -84,6 +105,7 @@ uv run extractor export CY2025-OTC-Catalog
 ### Auto-Extract (Recommended)
 ```bash
 uv run extractor auto catalogs/<file>.pdf
+uv run extractor auto catalogs/<file>.pdf --multi  # Higher accuracy, slower
 ```
 
 ### Web Verification UI
@@ -165,12 +187,24 @@ catalogdataextractor/
 
 ## How Auto-Extraction Works
 
+### Standard Mode
 1. **Table detection**: Uses pdfplumber's `find_tables()` to find structured tables with cell positions
 2. **Column detection**: Dynamically identifies which column contains count data
 3. **Field parsing**: Extracts item_no, product_name, and count from table rows
 4. **Position tracking**: Stores bounding box coordinates for each extracted field
 5. **Count parsing**: Parses "32 ct." into pkg=32, uom=ct
 6. **Fallback**: Uses regex-based extraction for pages without tables (no position data)
+
+### Multi-Method Mode (`--multi`)
+Uses three extraction methods and merges results:
+1. **Camelot** (confidence: 1.0) - High-accuracy table extraction using stream flavor
+2. **pdfplumber** (confidence: 0.95) - Table extraction with cell positions
+3. **pdfminer.six** (confidence: 0.8) - Text layout analysis with bounding boxes
+
+Products are matched by item_no and merged:
+- **product_name**: Longest non-empty value (captures full name)
+- **Other fields**: Highest confidence source wins
+- **field_locations**: Best confidence per field
 
 ## Tips
 
