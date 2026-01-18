@@ -19,11 +19,26 @@ CONFIDENCE_PDFMINER = 0.8
 CONFIDENCE_REGEX = 0.5
 
 # Patterns for identifying valid item numbers
-ITEM_NO_PATTERN = re.compile(r'^(\d{4,5})$')
+# Matches:
+#   - 4-5 digit numbers: 12345, 1234
+#   - Alphanumeric with prefix + digits: PMS989803150181, BJ100120, DBTDCF-A2310EN
+#   - Hyphenated codes with digits: TTRS-42, VR-1234, CS-2
+#   - Letter codes with digits: TSTAG1, TSTAG2
+# Must contain at least one digit to avoid matching plain words like "ABC-DEF"
+ITEM_NO_PATTERN = re.compile(
+    r'^('
+    r'[A-Z]{0,4}\d{4,}[-\dA-Z]*'          # Prefix + 4+ digits (PMS989803150181, BJ100120)
+    r'|[A-Z]{1,6}-(?=[\dA-Z-]*\d)[A-Z\d][\dA-Z-]*'  # Letter-hyphen-alphanumeric, must have digit (TTRS-42, CS-2)
+    r'|[A-Z]{2,6}\d+[A-Z\d]*'             # Letters + digits (TSTAG1, BJ240120)
+    r'|\d{4,5}'                            # 4-5 digit numbers
+    r')$',
+    re.IGNORECASE
+)
 
 # Patterns for parsing count/uom strings like "32 ct.", "100 pk", or "1,000 ct."
 # Note: UOM_UNITS is the single source of truth for unit patterns
-UOM_UNITS = r'ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit'
+# Includes standard units and /RL, /EACH style formats found in various catalogs
+UOM_UNITS = r'ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit|rl|cs|each|case|carton|drum|gal|pail|tub'
 
 COUNT_UOM_PATTERN = re.compile(
     rf'^([\d,]+)\s*({UOM_UNITS})\.?$',
@@ -31,8 +46,9 @@ COUNT_UOM_PATTERN = re.compile(
 )
 
 # Pattern for count column detection (unit is optional, for partial matches)
+# Handles both "32 ct." and "2,500/RL" formats
 COUNT_COLUMN_PATTERN = re.compile(
-    rf'^[\d,]+\s*({UOM_UNITS})?\.?$',
+    rf'^[\d,]+\s*[/]?\s*({UOM_UNITS})?\.?$',
     re.IGNORECASE
 )
 
@@ -45,6 +61,27 @@ PRODUCT_LINE_PATTERN = re.compile(
 # Pattern for item_no, count, price on one line (multi-line product name above)
 MULTILINE_ITEM_PATTERN = re.compile(
     rf'^(\d{{4,5}})\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
+    re.IGNORECASE
+)
+
+# Pattern: CODE $PRICE /UNIT (e.g., "PMS989803150181 $42.26 /EACH")
+# Used for product cards in specialty catalogs
+# Code must contain at least one digit to avoid matching plain words
+CODE_PRICE_PATTERN = re.compile(
+    r'^([A-Z]{2,4}(?=[\dA-Z-]*\d)[\dA-Z-]+)\s+\$([\d,]+\.?\d*)\s*/?(EACH|PAIR|RL|BX|CS|PK|EA|CT)\b',
+    re.IGNORECASE
+)
+
+# Pattern: "Item #" or "Item#" followed by code (e.g., "Item # TTRS-42")
+# Code must contain at least one digit
+ITEM_PREFIX_PATTERN = re.compile(
+    r'Item\s*#?\s*:?\s*([A-Z]{0,4}(?=[\dA-Z-]*\d)[\dA-Z][\dA-Z-]*)',
+    re.IGNORECASE
+)
+
+# Pattern for quantity with slash-prefix UOM (e.g., "2,500/RL", "100/EACH")
+SLASH_UOM_PATTERN = re.compile(
+    rf'^([\d,]+)\s*/\s*({UOM_UNITS})$',
     re.IGNORECASE
 )
 
@@ -69,7 +106,7 @@ def parse_count_uom(count_str: str) -> tuple[str, str]:
     """Parse count string like '32 ct.' into (pkg, uom) tuple.
 
     Args:
-        count_str: String like "32 ct.", "100 pk", "16 oz", "1,000 ct."
+        count_str: String like "32 ct.", "100 pk", "16 oz", "1,000 ct.", "2,500/RL"
 
     Returns:
         Tuple of (package count, unit of measure)
@@ -79,11 +116,19 @@ def parse_count_uom(count_str: str) -> tuple[str, str]:
         return '', ''
 
     count_str = count_str.strip()
+
+    # Try standard count/uom pattern (e.g., "32 ct.", "100 pk")
     match = COUNT_UOM_PATTERN.match(count_str)
     if match:
         # Remove commas from package count (e.g., "1,000" -> "1000")
         pkg = match.group(1).replace(',', '')
         return pkg, match.group(2).lower().rstrip('.')
+
+    # Try slash-separated format (e.g., "2,500/RL", "100/EACH")
+    slash_match = SLASH_UOM_PATTERN.match(count_str)
+    if slash_match:
+        pkg = slash_match.group(1).replace(',', '')
+        return pkg, slash_match.group(2).lower()
 
     # Try to extract just a number if present
     num_match = re.match(r'^([\d,]+)\s*(.*)$', count_str)
@@ -95,7 +140,13 @@ def parse_count_uom(count_str: str) -> tuple[str, str]:
 
 
 def is_valid_item_no(value: str) -> bool:
-    """Check if value looks like a valid item number (4-5 digits)."""
+    """Check if value looks like a valid item number.
+
+    Accepts:
+        - 4-5 digit numbers: 12345, 1234
+        - Alphanumeric codes: PMS989803150181, BJ100120
+        - Hyphenated codes: TTRS-42, VR-1234
+    """
     if not value:
         return False
     return bool(ITEM_NO_PATTERN.match(value.strip()))
@@ -290,7 +341,10 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
     """Fallback text-based extraction when no tables are found.
 
     Uses regex patterns to parse product lines from raw text.
-    Uses module-level PRODUCT_LINE_PATTERN and MULTILINE_ITEM_PATTERN.
+    Supports multiple catalog formats:
+      - OTC-style: item_no description count price
+      - Product cards: CODE $PRICE /UNIT
+      - Item prefix: "Item # XXX" on separate line
     """
     products = []
     lines = page.lines
@@ -307,7 +361,7 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
             i += 1
             continue
 
-        # Try single-line product pattern
+        # Try single-line product pattern (OTC-style)
         match = PRODUCT_LINE_PATTERN.match(line)
         if match:
             item_no = match.group(1)
@@ -352,6 +406,130 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
                 source_file=source_file,
             ))
             pending_description = []
+            i += 1
+            continue
+
+        # Try CODE $PRICE /UNIT pattern (product cards in specialty catalogs)
+        code_price_match = CODE_PRICE_PATTERN.match(line)
+        if code_price_match:
+            item_no = code_price_match.group(1)
+            uom = code_price_match.group(3).lower()
+
+            # Use pending description as product name
+            product_name = ' '.join(pending_description) if pending_description else ''
+            pending_description = []
+
+            products.append(Product(
+                product_name=product_name,
+                description=f'/{uom.upper()}',
+                item_no=item_no,
+                pkg='1',
+                uom=uom,
+                page_number=page.page_number,
+                source_file=source_file,
+            ))
+            i += 1
+            continue
+
+        # Try "Item #" or "Item#" prefix pattern
+        item_prefix_match = ITEM_PREFIX_PATTERN.search(line)
+        if item_prefix_match:
+            item_no = item_prefix_match.group(1)
+
+            # Look ahead for product name and price info
+            product_name = ''
+            uom = ''
+
+            # Check if there's more text on the same line after the item number
+            rest_of_line = line[item_prefix_match.end():].strip()
+            if rest_of_line:
+                product_name = rest_of_line
+
+            # Also use any pending description
+            if pending_description:
+                if product_name:
+                    product_name = ' '.join(pending_description) + ' ' + product_name
+                else:
+                    product_name = ' '.join(pending_description)
+                pending_description = []
+
+            # Look ahead for price/uom on next lines
+            j = i + 1
+            while j < len(lines) and j < i + 5:
+                next_line = lines[j].strip()
+                # Check for price with UOM (use UOM_UNITS for consistency)
+                price_uom_match = re.search(rf'\$[\d.]+\s*/?\s*({UOM_UNITS})\b', next_line, re.IGNORECASE)
+                if price_uom_match:
+                    uom = price_uom_match.group(1).lower()
+                    break
+                # Stop if we hit another item marker
+                if ITEM_PREFIX_PATTERN.search(next_line) or is_valid_item_no(next_line.split()[0] if next_line.split() else ''):
+                    break
+                # Accumulate additional description
+                if next_line and not next_line.startswith('$'):
+                    if product_name:
+                        product_name += ' ' + next_line
+                    else:
+                        product_name = next_line
+                j += 1
+
+            if item_no and is_valid_item_no(item_no):
+                products.append(Product(
+                    product_name=product_name,
+                    description=f'/{uom.upper()}' if uom else '',
+                    item_no=item_no,
+                    pkg='1' if uom else '',
+                    uom=uom,
+                    page_number=page.page_number,
+                    source_file=source_file,
+                ))
+            i += 1
+            continue
+
+        # Check for standalone alphanumeric item codes (e.g., "PMS989803150181")
+        # is_valid_item_no already rejects short numbers (< 4 digits)
+        if is_valid_item_no(line):
+            # This might be a standalone item number
+            # Look ahead for price/description
+            item_no = line
+            product_name = ''
+            uom = ''
+
+            j = i + 1
+            while j < len(lines) and j < i + 5:
+                next_line = lines[j].strip()
+                # Check for price with UOM (use UOM_UNITS for consistency)
+                price_uom_match = re.search(rf'\$[\d.]+\s*/?\s*({UOM_UNITS})\b', next_line, re.IGNORECASE)
+                if price_uom_match:
+                    uom = price_uom_match.group(1).lower()
+                    break
+                # Stop if we hit another item
+                if is_valid_item_no(next_line):
+                    break
+                # Accumulate description
+                if next_line and not next_line.startswith('$'):
+                    if product_name:
+                        product_name += ' ' + next_line
+                    else:
+                        product_name = next_line
+                j += 1
+
+            # Use pending description if we don't have a product name
+            if not product_name and pending_description:
+                product_name = ' '.join(pending_description)
+            # Always clear pending_description after processing a product
+            pending_description = []
+
+            if item_no:
+                products.append(Product(
+                    product_name=product_name,
+                    description=f'/{uom.upper()}' if uom else '',
+                    item_no=item_no,
+                    pkg='1' if uom else '',
+                    uom=uom,
+                    page_number=page.page_number,
+                    source_file=source_file,
+                ))
             i += 1
             continue
 
@@ -537,13 +715,9 @@ class AutoExtractor:
 
         # Convert text blocks to lines for regex extraction
         all_lines = []
-        line_positions = {}  # Map line text to bbox
-
         for block in text_blocks:
             for line_data in block.get('lines', []):
-                line_text = line_data['text']
-                all_lines.append(line_text)
-                line_positions[line_text] = line_data['bbox']
+                all_lines.append(line_data['text'])
 
         # Create a synthetic PageContent for the fallback extractor
         page_content = PageContent(
@@ -554,9 +728,10 @@ class AutoExtractor:
 
         products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
 
-        # Update confidence and try to add positions from pdfminer
+        # Update confidence for pdfminer extraction
+        # Note: Position data from pdfminer is not used since regex fallback
+        # doesn't track which text corresponds to which field
         for product in products:
-            # Set base confidence for pdfminer extraction
             for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
                 if field_name not in product.field_locations:
                     product.field_locations[field_name] = FieldLocation(
@@ -595,14 +770,15 @@ class AutoExtractor:
 
             # Multiple extractions - merge them
             merged = self._merge_product_variants(products)
-            merged_products.append(merged)
+            if merged:
+                merged_products.append(merged)
 
         return merged_products
 
-    def _merge_product_variants(self, products: list[Product]) -> Product:
+    def _merge_product_variants(self, products: list[Product]) -> Product | None:
         """Merge multiple extractions of the same product."""
         if not products:
-            raise ValueError("Cannot merge empty product list")
+            return None
 
         # Start with the first product as base
         base = products[0]
