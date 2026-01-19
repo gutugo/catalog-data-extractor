@@ -82,7 +82,7 @@ def process_all(
 
     if not pdf_files:
         console.print(f"[yellow]No PDF files found in {catalog_dir}[/yellow]")
-        raise typer.Exit(0)
+        raise typer.Exit(1)
 
     console.print(f"[cyan]Found {len(pdf_files)} PDF files to process[/cyan]")
 

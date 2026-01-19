@@ -2,6 +2,8 @@
 
 import atexit
 import io
+import sys
+import traceback
 import threading
 from pathlib import Path
 
@@ -29,6 +31,9 @@ _state: dict = {
     'dashboard_mode': False,  # True when no catalog is loaded initially
 }
 
+# Lock for thread-safe access to _state
+_state_lock = threading.Lock()
+
 # Background extraction jobs: {catalog_name: {'status': str, 'progress': dict, 'error': str}}
 _extraction_jobs: dict = {}
 _extraction_lock = threading.Lock()  # Thread lock for _extraction_jobs access
@@ -39,16 +44,21 @@ _cleanup_registered = False
 
 def cleanup_pdf():
     """Close the PDF document on exit."""
-    if _state['pdf_doc']:
-        _state['pdf_doc'].close()
-        _state['pdf_doc'] = None
+    with _state_lock:
+        if _state['pdf_doc']:
+            try:
+                _state['pdf_doc'].close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            _state['pdf_doc'] = None
 
 
 def list_catalogs() -> list[dict]:
-    """List all catalogs with their status.
+    """List catalogs that exist in /catalogs directory.
 
     Returns list of dicts with keys: name, status, products_count, pages
     Status can be: 'uploaded', 'extracting', 'ready', 'exported'
+    Only includes catalogs with PDF files in the catalogs directory.
     """
     catalogs = []
 
@@ -57,17 +67,26 @@ def list_catalogs() -> list[dict]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     EXTRACTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Find all PDFs in catalogs directory
-    pdf_files = set()
+    # Clean up completed/errored extraction jobs (prevent memory leak)
+    with _extraction_lock:
+        to_remove = [k for k, v in _extraction_jobs.items() if v['status'] != 'extracting']
+        for k in to_remove:
+            del _extraction_jobs[k]
+
+    # Find all PDFs in catalogs directory (ONLY these will be shown)
+    pdf_files = {}
     for pdf in CATALOGS_DIR.glob("*.pdf"):
-        pdf_files.add(pdf.stem)
+        pdf_files[pdf.stem] = pdf
     for pdf in CATALOGS_DIR.glob("*.PDF"):
-        pdf_files.add(pdf.stem)
+        pdf_files[pdf.stem] = pdf
 
     # Find all sessions
     sessions = {}
     for session_file in SESSIONS_DIR.glob("*.session.json"):
-        name = session_file.stem.replace('.session', '')
+        # stem gives "foo.session", remove the ".session" suffix
+        name = session_file.stem
+        if name.endswith('.session'):
+            name = name[:-8]  # Remove '.session' (8 chars)
         sessions[name] = session_file
 
     # Find all exports
@@ -75,13 +94,11 @@ def list_catalogs() -> list[dict]:
     for csv_file in EXTRACTIONS_DIR.glob("*.csv"):
         exports.add(csv_file.stem)
 
-    # Combine into catalog list
-    all_names = pdf_files | set(sessions.keys())
-
-    for name in sorted(all_names):
+    # Only show catalogs that have PDFs in /catalogs
+    for name in sorted(pdf_files.keys()):
         catalog = {
             'name': name,
-            'has_pdf': name in pdf_files,
+            'has_pdf': True,
             'products_count': 0,
             'pages': 0,
             'status': 'uploaded',
@@ -98,6 +115,7 @@ def list_catalogs() -> list[dict]:
                     catalog['progress'] = job['progress'].copy()
                 if job.get('error'):
                     catalog['error'] = job['error']
+
         # Check if has session (only if not currently extracting)
         if not is_extracting:
             if name in sessions:
@@ -106,9 +124,6 @@ def list_catalogs() -> list[dict]:
                     catalog['products_count'] = len(session.products)
                     catalog['pages'] = session.total_pages
                     catalog['status'] = 'exported' if name in exports else 'ready'
-            # Otherwise just uploaded PDF
-            elif name in pdf_files:
-                catalog['status'] = 'uploaded'
 
         catalogs.append(catalog)
 
@@ -148,6 +163,32 @@ def init_app(pdf_path: Path = None, session: ExtractionSession = None,
 @app.route('/')
 def index():
     """Main verification page."""
+    # Check for catalog query param to auto-load
+    catalog_name = request.args.get('catalog')
+    if catalog_name:
+        # Try to load this catalog
+        session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
+        if session_path.exists():
+            session = ExtractionSession.load(session_path)
+            if session:
+                # Find PDF
+                pdf_path = CATALOGS_DIR / session.source_file
+                if not pdf_path.exists():
+                    pdf_path = Path.cwd() / session.source_file
+
+                if pdf_path.exists():
+                    with _state_lock:
+                        old_doc = _state['pdf_doc']
+                        try:
+                            _state['pdf_doc'] = fitz.open(pdf_path)
+                            if old_doc:
+                                old_doc.close()
+                            _state['pdf_path'] = pdf_path
+                            _state['session'] = session
+                            _state['dashboard_mode'] = False
+                        except Exception:
+                            pass
+
     session = _state['session']
 
     if _state['dashboard_mode'] or session is None:
@@ -190,15 +231,23 @@ def upload_catalog():
         return jsonify({'error': 'No file provided'}), 400
 
     file = request.files['file']
-    if file.filename == '':
+    if file.filename == '' or file.filename is None:
         return jsonify({'error': 'No file selected'}), 400
 
     if not file.filename.lower().endswith('.pdf'):
         return jsonify({'error': 'Only PDF files are allowed'}), 400
 
-    # Secure the filename
+    # Secure the filename - validates and sanitizes
     filename = secure_filename(file.filename)
     if not filename:
+        return jsonify({'error': 'Invalid filename'}), 400
+
+    # Additional validation: ensure filename ends with .pdf after sanitization
+    if not filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Invalid filename after sanitization'}), 400
+
+    # Ensure no path components remain (double-check secure_filename worked)
+    if '/' in filename or '\\' in filename or '..' in filename:
         return jsonify({'error': 'Invalid filename'}), 400
 
     # Ensure catalogs directory exists
@@ -228,20 +277,19 @@ def upload_catalog():
 @app.route('/api/extract/<catalog_name>', methods=['POST'])
 def start_extraction(catalog_name: str):
     """Start auto-extraction for a catalog."""
-    # Check if already extracting (thread-safe)
-    with _extraction_lock:
-        if catalog_name in _extraction_jobs and _extraction_jobs[catalog_name]['status'] == 'extracting':
-            return jsonify({'error': 'Extraction already in progress'}), 400
-
-    # Find the PDF
+    # Find the PDF first (before acquiring lock)
     pdf_path = CATALOGS_DIR / f"{catalog_name}.pdf"
     if not pdf_path.exists():
         pdf_path = CATALOGS_DIR / f"{catalog_name}.PDF"
     if not pdf_path.exists():
         return jsonify({'error': 'PDF not found'}), 404
 
-    # Initialize job status (thread-safe)
+    # Check and initialize in single lock acquisition (prevents TOCTOU race)
     with _extraction_lock:
+        if catalog_name in _extraction_jobs and _extraction_jobs[catalog_name]['status'] == 'extracting':
+            return jsonify({'error': 'Extraction already in progress'}), 400
+
+        # Clean up old completed/errored jobs for this catalog
         _extraction_jobs[catalog_name] = {
             'status': 'extracting',
             'progress': {'page': 0, 'total_pages': 0, 'products': 0},
@@ -268,6 +316,9 @@ def start_extraction(catalog_name: str):
                 _extraction_jobs[catalog_name]['status'] = 'completed'
                 _extraction_jobs[catalog_name]['progress']['products'] = len(session.products)
         except Exception as e:
+            # Log full stack trace for debugging
+            error_msg = f"{e}\n{traceback.format_exc()}"
+            print(f"Extraction error for {catalog_name}: {error_msg}", file=sys.stderr)
             with _extraction_lock:
                 _extraction_jobs[catalog_name]['status'] = 'error'
                 _extraction_jobs[catalog_name]['error'] = str(e)
@@ -288,28 +339,29 @@ def get_extraction_status(catalog_name: str):
     """Get extraction progress for a catalog."""
     # Thread-safe access to _extraction_jobs
     with _extraction_lock:
-        if catalog_name not in _extraction_jobs:
-            # Check if session exists (already extracted)
-            session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
-            if session_path.exists():
-                session = ExtractionSession.load(session_path)
-                if session:
-                    return jsonify({
-                        'status': 'completed',
-                        'progress': {
-                            'page': session.total_pages,
-                            'total_pages': session.total_pages,
-                            'products': len(session.products),
-                        },
-                    })
-            return jsonify({'error': 'No extraction job found'}), 404
+        if catalog_name in _extraction_jobs:
+            job = _extraction_jobs[catalog_name]
+            return jsonify({
+                'status': job['status'],
+                'progress': job['progress'].copy(),
+                'error': job.get('error'),
+            })
 
-        job = _extraction_jobs[catalog_name]
-        return jsonify({
-            'status': job['status'],
-            'progress': job['progress'].copy(),
-            'error': job.get('error'),
-        })
+    # Not in jobs - check if session exists (do this outside lock to avoid blocking)
+    session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
+    if session_path.exists():
+        session = ExtractionSession.load(session_path)
+        if session:
+            return jsonify({
+                'status': 'completed',
+                'progress': {
+                    'page': session.total_pages,
+                    'total_pages': session.total_pages,
+                    'products': len(session.products),
+                },
+            })
+
+    return jsonify({'error': 'No extraction job found'}), 404
 
 
 @app.route('/api/switch/<catalog_name>', methods=['POST'])
@@ -331,15 +383,28 @@ def switch_catalog(catalog_name: str):
     if not pdf_path.exists():
         return jsonify({'error': f'PDF not found: {session.source_file}'}), 404
 
-    # Close current PDF if open
-    if _state['pdf_doc']:
-        _state['pdf_doc'].close()
+    # Thread-safe state update with proper resource cleanup
+    with _state_lock:
+        old_pdf_doc = _state['pdf_doc']
 
-    # Load new catalog
-    _state['pdf_path'] = pdf_path
-    _state['session'] = session
-    _state['pdf_doc'] = fitz.open(pdf_path)
-    _state['dashboard_mode'] = False
+        # Open new PDF first (before closing old one)
+        try:
+            new_pdf_doc = fitz.open(pdf_path)
+        except Exception as e:
+            return jsonify({'error': f'Failed to open PDF: {e}'}), 500
+
+        # Close old PDF after successfully opening new one
+        if old_pdf_doc:
+            try:
+                old_pdf_doc.close()
+            except Exception:
+                pass  # Ignore close errors
+
+        # Update state
+        _state['pdf_path'] = pdf_path
+        _state['session'] = session
+        _state['pdf_doc'] = new_pdf_doc
+        _state['dashboard_mode'] = False
 
     return jsonify({
         'success': True,
@@ -356,17 +421,20 @@ def switch_catalog(catalog_name: str):
 @app.route('/api/page/<int:page_num>')
 def get_page(page_num: int):
     """Get page data including image and extracted products."""
-    session = _state['session']
+    with _state_lock:
+        session = _state['session']
+        if session is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
+        total_pages = session.total_pages
+        # Copy products list to avoid holding lock during iteration
+        session_products = list(session.products)
 
-    if session is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
-
-    if page_num < 1 or page_num > session.total_pages:
+    if page_num < 1 or page_num > total_pages:
         return jsonify({'error': 'Invalid page number'}), 400
 
     # Get products for this page (use stable product IDs, not list indices)
     products = []
-    for p in session.products:
+    for p in session_products:
         if p.page_number == page_num:
             product_data = {
                 'id': p.id,
@@ -385,7 +453,7 @@ def get_page(page_num: int):
 
     return jsonify({
         'page_number': page_num,
-        'total_pages': session.total_pages,
+        'total_pages': total_pages,
         'products': products,
     })
 
@@ -393,28 +461,32 @@ def get_page(page_num: int):
 @app.route('/api/page/<int:page_num>/image')
 def get_page_image(page_num: int):
     """Get PDF page as PNG image."""
-    session = _state['session']
-    pdf_doc = _state['pdf_doc']
+    with _state_lock:
+        session = _state['session']
+        pdf_doc = _state['pdf_doc']
 
-    if session is None or pdf_doc is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
+        if session is None or pdf_doc is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
 
-    if page_num < 1 or page_num > session.total_pages:
-        return jsonify({'error': 'Invalid page number'}), 400
+        total_pages = session.total_pages
 
-    # Render page to image (0-indexed in PyMuPDF)
-    page = pdf_doc[page_num - 1]
+        if page_num < 1 or page_num > total_pages:
+            return jsonify({'error': 'Invalid page number'}), 400
 
-    # Get zoom level from query params (default 2x for good quality)
-    try:
-        zoom = float(request.args.get('zoom', 1.0))
-        zoom = max(1.0, min(zoom, 5.0))  # Clamp between 1x and 5x
-    except (ValueError, TypeError):
-        zoom = 1.0
-    mat = fitz.Matrix(zoom, zoom)
+        # Render page to image (0-indexed in PyMuPDF)
+        # Note: We hold the lock during rendering to prevent pdf_doc from being closed
+        page = pdf_doc[page_num - 1]
 
-    pix = page.get_pixmap(matrix=mat)
-    img_bytes = pix.tobytes('png')
+        # Get zoom level from query params (default 2x for good quality)
+        try:
+            zoom = float(request.args.get('zoom', 1.0))
+            zoom = max(1.0, min(zoom, 5.0))  # Clamp between 1x and 5x
+        except (ValueError, TypeError):
+            zoom = 1.0
+        mat = fitz.Matrix(zoom, zoom)
+
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes('png')
 
     return send_file(
         io.BytesIO(img_bytes),
@@ -423,7 +495,7 @@ def get_page_image(page_num: int):
     )
 
 
-def _find_product_by_id(session, product_id: str):
+def _find_product_by_id(session: ExtractionSession, product_id: str) -> tuple[Product | None, int]:
     """Find a product by its ID. Returns (product, index) or (None, -1)."""
     for i, p in enumerate(session.products):
         if p.id == product_id:
@@ -434,157 +506,166 @@ def _find_product_by_id(session, product_id: str):
 @app.route('/api/product/<product_id>', methods=['PUT'])
 def update_product(product_id: str):
     """Update a product's data."""
-    session = _state['session']
-
-    if session is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
-
-    product, _ = _find_product_by_id(session, product_id)
-    if product is None:
-        return jsonify({'error': 'Product not found'}), 404
-
     data = request.json
     if data is None:
         return jsonify({'error': 'Invalid JSON body'}), 400
 
-    # Update fields
-    if 'product_name' in data:
-        product.product_name = data['product_name']
-    if 'description' in data:
-        product.description = data['description']
-    if 'item_no' in data:
-        product.item_no = data['item_no']
-    if 'pkg' in data:
-        product.pkg = data['pkg']
-    if 'uom' in data:
-        product.uom = data['uom']
+    with _state_lock:
+        session = _state['session']
+        if session is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
 
-    # Update field locations if provided
-    if 'field_locations' in data and data['field_locations']:
-        for field_name, loc_data in data['field_locations'].items():
-            product.field_locations[field_name] = FieldLocation.from_dict(loc_data)
+        product, _ = _find_product_by_id(session, product_id)
+        if product is None:
+            return jsonify({'error': 'Product not found'}), 404
 
-    return jsonify({'success': True, 'product': product.to_dict()})
+        # Update fields
+        if 'product_name' in data:
+            product.product_name = data['product_name']
+        if 'description' in data:
+            product.description = data['description']
+        if 'item_no' in data:
+            product.item_no = data['item_no']
+        if 'pkg' in data:
+            product.pkg = data['pkg']
+        if 'uom' in data:
+            product.uom = data['uom']
+
+        # Update field locations if provided
+        if 'field_locations' in data and data['field_locations']:
+            for field_name, loc_data in data['field_locations'].items():
+                product.field_locations[field_name] = FieldLocation.from_dict(loc_data)
+
+        result = product.to_dict()
+
+    return jsonify({'success': True, 'product': result})
 
 
 @app.route('/api/product', methods=['POST'])
 def add_product():
     """Add a new product."""
-    session = _state['session']
-
-    if session is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
-
     data = request.json
-
     if data is None:
         return jsonify({'error': 'Invalid JSON body'}), 400
 
-    product = Product(
-        product_name=data.get('product_name', ''),
-        description=data.get('description', ''),
-        item_no=data.get('item_no', ''),
-        pkg=data.get('pkg', ''),
-        uom=data.get('uom', ''),
-        page_number=data.get('page_number', 1),
-        source_file=session.source_file,
-    )
+    with _state_lock:
+        session = _state['session']
+        if session is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
 
-    session.add_product(product)
+        product = Product(
+            product_name=data.get('product_name', ''),
+            description=data.get('description', ''),
+            item_no=data.get('item_no', ''),
+            pkg=data.get('pkg', ''),
+            uom=data.get('uom', ''),
+            page_number=data.get('page_number', 1),
+            source_file=session.source_file,
+        )
 
-    return jsonify({
-        'success': True,
-        'index': len(session.products) - 1,
-        'product': product.to_dict()
-    })
+        session.add_product(product)
+        result = {
+            'success': True,
+            'index': len(session.products) - 1,
+            'product': product.to_dict()
+        }
+
+    return jsonify(result)
 
 
 @app.route('/api/product/<product_id>', methods=['DELETE'])
 def delete_product(product_id: str):
     """Delete a product."""
-    session = _state['session']
+    with _state_lock:
+        session = _state['session']
+        if session is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
 
-    if session is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
+        product, index = _find_product_by_id(session, product_id)
+        if product is None:
+            return jsonify({'error': 'Product not found'}), 404
 
-    product, index = _find_product_by_id(session, product_id)
-    if product is None:
-        return jsonify({'error': 'Product not found'}), 404
+        deleted = session.products.pop(index)
+        result = deleted.to_dict()
 
-    deleted = session.products.pop(index)
-
-    return jsonify({'success': True, 'deleted': deleted.to_dict()})
+    return jsonify({'success': True, 'deleted': result})
 
 
 @app.route('/api/save', methods=['POST'])
 def save_session():
     """Save the current session."""
-    session = _state['session']
-    session_dir = _state['session_dir']
+    with _state_lock:
+        session = _state['session']
+        session_dir = _state['session_dir']
 
-    if session is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
+        if session is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
 
-    session.save(session_dir)
+        session.save(session_dir)
+        products_count = len(session.products)
 
-    return jsonify({'success': True, 'products_count': len(session.products)})
+    return jsonify({'success': True, 'products_count': products_count})
 
 
 @app.route('/api/export-csv', methods=['POST'])
 def export_csv():
     """Export session to CSV file."""
-    session = _state['session']
-    session_dir = _state['session_dir']
+    with _state_lock:
+        session = _state['session']
+        session_dir = _state['session_dir']
 
-    if session is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
+        if session is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
 
-    # Save session first to ensure latest changes are persisted
-    session.save(session_dir)
+        # Save session first to ensure latest changes are persisted
+        session.save(session_dir)
 
-    # Export to CSV (extractions directory is sibling to sessions)
-    extractions_dir = session_dir.parent / 'extractions'
-    extractions_dir.mkdir(parents=True, exist_ok=True)
+        # Export to CSV (extractions directory is sibling to sessions)
+        extractions_dir = session_dir.parent / 'extractions'
+        extractions_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = export_to_csv(session, extractions_dir)
+        csv_path = export_to_csv(session, extractions_dir)
+        products_count = len(session.products)
 
     return jsonify({
         'success': True,
         'csv_path': str(csv_path),
-        'products_count': len(session.products)
+        'products_count': products_count
     })
 
 
 @app.route('/api/stats')
 def get_stats():
     """Get session statistics including total product count."""
-    session = _state['session']
+    with _state_lock:
+        session = _state['session']
 
-    if session is None:
+        if session is None:
+            return jsonify({
+                'total_products': 0,
+                'total_pages': 0,
+                'source_file': None,
+                'dashboard_mode': True,
+            })
+
         return jsonify({
-            'total_products': 0,
-            'total_pages': 0,
-            'source_file': None,
-            'dashboard_mode': True,
+            'total_products': len(session.products),
+            'total_pages': session.total_pages,
+            'source_file': session.source_file,
+            'dashboard_mode': False,
         })
-
-    return jsonify({
-        'total_products': len(session.products),
-        'total_pages': session.total_pages,
-        'source_file': session.source_file,
-        'dashboard_mode': False,
-    })
 
 
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():
     """Shutdown the server gracefully."""
-    session = _state['session']
-    session_dir = _state['session_dir']
+    with _state_lock:
+        session = _state['session']
+        session_dir = _state['session_dir']
 
-    # Save session before shutdown if one is loaded
-    if session and session_dir:
-        session.save(session_dir)
+        # Save session before shutdown if one is loaded
+        if session and session_dir:
+            session.save(session_dir)
 
     # Schedule shutdown
     func = request.environ.get('werkzeug.server.shutdown')
@@ -605,30 +686,35 @@ def shutdown():
 @app.route('/api/extract-text', methods=['POST'])
 def extract_text_from_region():
     """Extract text from a selected region on a PDF page."""
-    pdf_doc = _state['pdf_doc']
-
-    if pdf_doc is None:
-        return jsonify({'error': 'No catalog loaded'}), 400
-
     data = request.json
-
     if data is None:
         return jsonify({'error': 'Invalid JSON body'}), 400
 
     page_num = data.get('page_number', 1)
     # Coordinates are in image space, need to convert to PDF space
     zoom = data.get('zoom', 2.0)
+
+    # Validate zoom to prevent division by zero
+    if not isinstance(zoom, (int, float)) or zoom <= 0:
+        zoom = 2.0
+
     x0 = data.get('x0', 0) / zoom
     y0 = data.get('y0', 0) / zoom
     x1 = data.get('x1', 0) / zoom
     y1 = data.get('y1', 0) / zoom
 
-    if page_num < 1 or page_num > len(pdf_doc):
-        return jsonify({'error': 'Invalid page number'}), 400
+    with _state_lock:
+        pdf_doc = _state['pdf_doc']
 
-    page = pdf_doc[page_num - 1]
-    rect = fitz.Rect(x0, y0, x1, y1)
-    text = page.get_text('text', clip=rect).strip()
+        if pdf_doc is None:
+            return jsonify({'error': 'No catalog loaded'}), 400
+
+        if page_num < 1 or page_num > len(pdf_doc):
+            return jsonify({'error': 'Invalid page number'}), 400
+
+        page = pdf_doc[page_num - 1]
+        rect = fitz.Rect(x0, y0, x1, y1)
+        text = page.get_text('text', clip=rect).strip()
 
     return jsonify({
         'success': True,

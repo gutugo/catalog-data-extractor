@@ -37,9 +37,18 @@ def export_to_csv(
 
     output_path = output_dir / filename
 
-    # Convert products to DataFrame
-    data = [product.to_dict() for product in session.products]
+    # Convert products to DataFrame with proper column handling
+    data = []
+    for product in session.products:
+        product_dict = product.to_dict()
+        # Ensure all CSV columns are present with empty string defaults
+        row = {col: product_dict.get(col, '') for col in CSV_COLUMNS}
+        data.append(row)
+
     df = pd.DataFrame(data, columns=CSV_COLUMNS)
+
+    # Replace any NaN values with empty strings for cleaner CSV output
+    df = df.fillna('')
 
     # Export to CSV
     df.to_csv(output_path, index=False)

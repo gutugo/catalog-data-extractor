@@ -242,7 +242,9 @@ class PDFReader:
                         row_cells = cell_positions[row_idx]
                         if col_idx < len(row_cells):
                             cell = row_cells[col_idx]
-                            if hasattr(cell, 'x1') and hasattr(cell, 'y1'):
+                            # Check all four bbox attributes exist before using them
+                            if (hasattr(cell, 'x1') and hasattr(cell, 'y1') and
+                                    hasattr(cell, 'x2') and hasattr(cell, 'y2')):
                                 cell_bbox = (cell.x1, cell.y1, cell.x2, cell.y2)
 
                     row_data.append({

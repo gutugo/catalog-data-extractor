@@ -139,6 +139,7 @@
             margin-bottom: 8px;
         }
 
+
         /* Catalog list */
         .catalog-list {
             flex: 1;
@@ -762,19 +763,18 @@
             <div class="sidebar-header">
                 <h2>Catalogs</h2>
             </div>
-
-            <!-- Upload Zone -->
+            <div class="sidebar-section catalog-list" id="catalog-list">
+                <!-- Loaded via JS -->
+            </div>
+            <div class="sidebar-header">
+                <h2>Upload New</h2>
+            </div>
             <div class="sidebar-section">
+                <input type="file" id="file-input" accept=".pdf" style="display:none">
                 <div class="upload-zone" id="upload-zone">
-                    <input type="file" id="file-input" accept=".pdf" hidden>
                     <div class="upload-icon">+</div>
                     <p>Drop PDF here<br>or click to upload</p>
                 </div>
-            </div>
-
-            <!-- Catalog List -->
-            <div class="sidebar-section catalog-list" id="catalog-list">
-                <!-- Dynamically populated -->
             </div>
         </div>
 
@@ -847,9 +847,10 @@
         <!-- Dashboard welcome screen -->
         <div class="welcome-screen" id="welcome-screen">
             <div class="arrow">&larr;</div>
-            <h2>Welcome</h2>
+            <h2>No Catalog Loaded</h2>
             <p>
-                Upload a PDF catalog using the sidebar, or select an existing catalog to view and verify extracted products.
+                Upload a PDF using the sidebar.<br>
+                Extraction will start automatically.
             </p>
         </div>
         {% endif %}
@@ -904,8 +905,6 @@
         let selectedProductId = null;
         let hasUnsavedChanges = false;
         let dashboardMode = {{ 'true' if dashboard_mode else 'false' }};
-        let activeCatalog = {{ ('"%s"' % catalog_name) if catalog_name else 'null' | safe }};
-        let catalogs = [];
 
         // Warn before leaving with unsaved changes
         window.addEventListener('beforeunload', (e) => {
@@ -932,6 +931,9 @@
         const pdfImage = document.getElementById('pdf-image');
         const productsContainer = document.getElementById('products-container');
 
+        // Current catalog name (for highlighting in list)
+        let currentCatalog = {% if catalog_name %}{{ catalog_name | tojson }}{% else %}null{% endif %};
+
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             setupUploadZone();
@@ -942,25 +944,93 @@
             setupKeyboardShortcuts();
         });
 
+        // Load catalog list
+        async function loadCatalogs() {
+            try {
+                const response = await fetch('/api/catalogs');
+                const data = await response.json();
+                renderCatalogs(data.catalogs);
+            } catch (err) {
+                console.error('Failed to load catalogs:', err);
+            }
+        }
+
+        function renderCatalogs(catalogs) {
+            const container = document.getElementById('catalog-list');
+
+            if (catalogs.length === 0) {
+                container.innerHTML = '<div class="empty-catalogs">No catalogs yet</div>';
+                return;
+            }
+
+            container.innerHTML = catalogs.map(c => {
+                // Check if this is the active catalog (compare without extension)
+                const currentBase = currentCatalog ? currentCatalog.replace(/\.pdf$/i, '') : null;
+                const isActive = currentBase === c.name;
+                // Escape name for use in onclick attribute
+                const safeName = c.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+                // Different display based on status
+                let statusBadge = '';
+                let clickAction = `switchCatalog('${safeName}')`;
+                let meta = `${c.products_count} products`;
+
+                if (c.status === 'uploaded') {
+                    statusBadge = '<span class="catalog-status status-uploaded">Not extracted</span>';
+                    clickAction = `startExtraction('${safeName}')`;
+                    meta = 'Click to extract';
+                } else if (c.status === 'extracting') {
+                    statusBadge = '<span class="catalog-status status-extracting">Extracting...</span>';
+                    clickAction = '';
+                    meta = 'Please wait...';
+                }
+
+                return `
+                    <div class="catalog-item ${isActive ? 'active' : ''}" ${clickAction ? `onclick="${clickAction}"` : ''}>
+                        <div class="catalog-item-name">${escapeHtml(c.name)}</div>
+                        <div class="catalog-item-meta">
+                            <span>${meta}</span>
+                            ${statusBadge}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function switchCatalog(name) {
+            const currentBase = currentCatalog ? currentCatalog.replace(/\.pdf$/i, '') : null;
+            if (currentBase === name) return;
+
+            if (hasUnsavedChanges) {
+                if (!confirm('Save changes before switching?')) return;
+                await saveSession();
+            }
+
+            showToast('Loading ' + name + '...', 'success');
+            window.location.href = '/?catalog=' + encodeURIComponent(name);
+        }
+
         // ============================================
-        // Sidebar: Upload and Catalog Management
+        // Upload
         // ============================================
 
         function setupUploadZone() {
             const uploadZone = document.getElementById('upload-zone');
             const fileInput = document.getElementById('file-input');
 
-            // Click to upload
+            if (!uploadZone || !fileInput) {
+                console.error('Upload elements not found');
+                return;
+            }
+
             uploadZone.addEventListener('click', () => fileInput.click());
 
-            // File selected
             fileInput.addEventListener('change', (e) => {
                 if (e.target.files.length > 0) {
                     uploadFile(e.target.files[0]);
                 }
             });
 
-            // Drag and drop
             uploadZone.addEventListener('dragover', (e) => {
                 e.preventDefault();
                 uploadZone.classList.add('dragover');
@@ -978,304 +1048,98 @@
                     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
                         uploadFile(file);
                     } else {
-                        showToast('Please upload a PDF file', 'error');
+                        showToast('Only PDF files allowed', 'error');
                     }
                 }
             });
         }
 
         async function uploadFile(file) {
-            const formData = new FormData();
-            formData.append('file', file);
-
             try {
-                showToast('Uploading...', 'success');
+                const formData = new FormData();
+                formData.append('file', file);
+
+                showToast('Uploading ' + file.name + '...', 'success');
+
                 const response = await fetch('/api/upload', {
                     method: 'POST',
                     body: formData
                 });
 
+                if (!response.ok) {
+                    const err = await response.json();
+                    showToast(err.error || 'Upload failed: ' + response.status, 'error');
+                    return;
+                }
+
                 const result = await response.json();
                 if (result.success) {
-                    showToast(`Uploaded: ${result.filename}`, 'success');
-                    loadCatalogs();
+                    showToast(`Uploaded: ${result.filename} - Starting extraction...`, 'success');
+                    // Auto-start extraction
+                    startExtraction(result.name);
                 } else {
                     showToast(result.error || 'Upload failed', 'error');
                 }
             } catch (err) {
-                showToast('Network error uploading file', 'error');
+                showToast('Upload failed: ' + err.message, 'error');
             }
-        }
-
-        async function loadCatalogs() {
-            try {
-                const response = await fetch('/api/catalogs');
-                const data = await response.json();
-                catalogs = data.catalogs;
-                renderCatalogs();
-            } catch (err) {
-                console.error('Failed to load catalogs:', err);
-            }
-        }
-
-        function renderCatalogs() {
-            const container = document.getElementById('catalog-list');
-
-            if (catalogs.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-catalogs">
-                        No catalogs yet.<br>Upload a PDF to get started.
-                    </div>
-                `;
-                return;
-            }
-
-            container.innerHTML = catalogs.map(c => {
-                const isActive = activeCatalog && (c.name === activeCatalog.replace('.pdf', '').replace('.PDF', ''));
-                const statusClass = `status-${c.status}`;
-                // Escape catalog name for use in HTML attributes (prevents XSS)
-                const safeName = escapeHtml(c.name);
-                const safeNameJs = JSON.stringify(c.name);  // Safe for JS strings
-
-                let actions = '';
-                if (c.status === 'uploaded') {
-                    actions = `<button class="btn-extract" onclick="event.stopPropagation(); startExtraction(${safeNameJs})">Extract</button>`;
-                } else if (c.status === 'extracting') {
-                    const progress = c.progress || { page: 0, total_pages: 0 };
-                    const pct = progress.total_pages > 0 ? (progress.page / progress.total_pages * 100) : 0;
-                    actions = `
-                        <div class="progress-bar">
-                            <div class="progress-bar-fill" style="width: ${pct}%"></div>
-                        </div>
-                    `;
-                } else if (c.status === 'ready' || c.status === 'exported' || c.status === 'completed') {
-                    actions = `<button class="btn-view" onclick="event.stopPropagation(); switchCatalog(${safeNameJs})">View</button>`;
-                }
-
-                let meta = '';
-                if (c.products_count > 0) {
-                    meta = `${c.products_count} products`;
-                } else if (c.pages > 0) {
-                    meta = `${c.pages} pages`;
-                }
-
-                return `
-                    <div class="catalog-item ${isActive ? 'active' : ''}" data-name="${safeName}"
-                         onclick="switchCatalog(${safeNameJs})">
-                        <div class="catalog-item-name">${safeName}</div>
-                        <div class="catalog-item-meta">
-                            <span>${meta}</span>
-                            <span class="catalog-status ${statusClass}">${c.status}</span>
-                        </div>
-                        <div class="catalog-item-actions">
-                            ${actions}
-                        </div>
-                    </div>
-                `;
-            }).join('');
         }
 
         async function startExtraction(name) {
             try {
-                const response = await fetch(`/api/extract/${name}`, {
+                const response = await fetch(`/api/extract/${encodeURIComponent(name)}`, {
                     method: 'POST'
                 });
 
                 const result = await response.json();
                 if (result.success) {
-                    showToast('Extraction started', 'success');
+                    showToast('Extracting products...', 'success');
+                    loadCatalogs(); // Refresh to show extracting status
                     pollExtractionStatus(name);
                 } else {
-                    showToast(result.error || 'Failed to start extraction', 'error');
+                    showToast(result.error || 'Extraction failed', 'error');
                 }
             } catch (err) {
-                showToast('Network error starting extraction', 'error');
+                showToast('Extraction failed: ' + err.message, 'error');
             }
         }
 
-        function pollExtractionStatus(name) {
-            const pollInterval = setInterval(async () => {
+        async function pollExtractionStatus(name) {
+            const checkStatus = async () => {
+                const response = await fetch(`/api/extract/${encodeURIComponent(name)}/status`);
+                const data = await response.json();
+                return data;
+            };
+
+            // Poll until done
+            while (true) {
                 try {
-                    const response = await fetch(`/api/extract/${name}/status`);
-                    const data = await response.json();
+                    const data = await checkStatus();
 
-                    // Update local catalog data
-                    const catalog = catalogs.find(c => c.name === name);
-                    if (catalog) {
-                        catalog.status = data.status;
-                        catalog.progress = data.progress;
-                        if (data.status === 'completed') {
-                            catalog.products_count = data.progress.products;
-                            catalog.status = 'ready';
+                    if (data.status === 'extracting') {
+                        const p = data.progress;
+                        if (p.total_pages > 0) {
+                            showToast(`Extracting: page ${p.page}/${p.total_pages} (${p.products} products)`, 'success');
                         }
-                        renderCatalogs();
-                    }
-
-                    if (data.status === 'completed' || data.status === 'error') {
-                        clearInterval(pollInterval);
-                        if (data.status === 'completed') {
-                            showToast(`Extraction complete: ${data.progress.products} products`, 'success');
-                        } else {
-                            showToast(`Extraction failed: ${data.error}`, 'error');
-                        }
-                        loadCatalogs();
+                    } else if (data.status === 'completed') {
+                        showToast(`Done! ${data.progress.products} products. Reloading...`, 'success');
+                        setTimeout(() => {
+                            window.location.href = '/?catalog=' + encodeURIComponent(name);
+                        }, 500);
+                        return;
+                    } else if (data.status === 'error') {
+                        showToast('Extraction failed: ' + (data.error || 'Unknown error'), 'error');
+                        loadCatalogs(); // Refresh list
+                        return;
                     }
                 } catch (err) {
-                    console.error('Error polling extraction status:', err);
+                    showToast('Error: ' + err.message, 'error');
+                    loadCatalogs(); // Refresh list
+                    return;
                 }
-            }, 500);
-        }
-
-        async function switchCatalog(name) {
-            // Don't switch if already active
-            if (activeCatalog && name === activeCatalog.replace('.pdf', '').replace('.PDF', '')) {
-                return;
+                // Wait 500ms before next poll
+                await new Promise(r => setTimeout(r, 500));
             }
-
-            // Check for unsaved changes
-            if (hasUnsavedChanges) {
-                const confirm = window.confirm('You have unsaved changes. Save before switching?');
-                if (confirm) {
-                    await saveSession();
-                }
-            }
-
-            try {
-                const response = await fetch(`/api/switch/${name}`, {
-                    method: 'POST'
-                });
-
-                const result = await response.json();
-                if (result.success) {
-                    // Update state
-                    activeCatalog = result.catalog_name;
-                    totalPages = result.total_pages;
-                    dashboardMode = false;
-                    hasUnsavedChanges = false;
-
-                    // Update UI
-                    document.getElementById('header-title').textContent = result.catalog_name;
-                    document.getElementById('header-info').innerHTML = `
-                        <span><span id="total-pages">${result.total_pages}</span> pages</span>
-                        <span><span id="product-count">${result.total_products}</span> products</span>
-                    `;
-
-                    // Show header actions if hidden
-                    const headerActions = document.getElementById('header-actions');
-                    if (!headerActions.querySelector('.btn-verify')) {
-                        headerActions.innerHTML = `
-                            <button class="btn btn-verify" id="verify-btn" onclick="toggleVerificationMode()">Start Verification</button>
-                            <button class="btn btn-secondary" onclick="addProduct()">+ Add Product</button>
-                            <button class="btn btn-primary" onclick="saveSession()">Save</button>
-                            <button class="btn btn-export" onclick="exportCSV()">Update CSV</button>
-                            <button class="btn btn-exit" onclick="exitVerifier()">Exit</button>
-                        `;
-                    }
-
-                    // Show panels, hide welcome screen
-                    const welcomeScreen = document.getElementById('welcome-screen');
-                    if (welcomeScreen) {
-                        welcomeScreen.remove();
-                    }
-
-                    // Create panels if they don't exist
-                    if (!document.getElementById('pdf-panel')) {
-                        createPanels(result.total_pages);
-                    } else {
-                        document.getElementById('pdf-panel').classList.remove('hidden');
-                        document.getElementById('data-panel').classList.remove('hidden');
-                        document.getElementById('max-pages').textContent = result.total_pages;
-                        document.getElementById('page-input').max = result.total_pages;
-                    }
-
-                    // Load first page
-                    currentPage = 1;
-                    loadPage(1);
-                    loadCatalogs();
-
-                    showToast(`Loaded: ${result.catalog_name}`, 'success');
-                } else {
-                    showToast(result.error || 'Failed to switch catalog', 'error');
-                }
-            } catch (err) {
-                showToast('Network error switching catalog', 'error');
-            }
-        }
-
-        function createPanels(maxPages) {
-            const mainContainer = document.querySelector('.main-container');
-
-            // Create PDF panel
-            const pdfPanel = document.createElement('div');
-            pdfPanel.className = 'pdf-panel';
-            pdfPanel.id = 'pdf-panel';
-            pdfPanel.innerHTML = `
-                <div class="panel-header">
-                    <span class="panel-title">PDF Page</span>
-                    <div class="nav-controls">
-                        <button class="nav-btn" id="prev-btn" onclick="goToPage(currentPage - 1)">&larr; Prev</button>
-                        <span class="page-indicator">
-                            <input type="number" id="page-input" min="1" max="${maxPages}" value="1"
-                                   style="width: 50px; text-align: center; background: #0f3460; border: none; color: white; padding: 4px; border-radius: 3px;"
-                                   onchange="goToPage(parseInt(this.value))">
-                            / <span id="max-pages">${maxPages}</span>
-                        </span>
-                        <button class="nav-btn" id="next-btn" onclick="goToPage(currentPage + 1)">Next &rarr;</button>
-                    </div>
-                    <div class="zoom-controls">
-                        <button class="zoom-btn" onclick="zoomOut()">−</button>
-                        <span id="zoom-value" style="font-size: 12px; min-width: 45px; text-align: center;">100%</span>
-                        <button class="zoom-btn" onclick="zoomIn()">+</button>
-                    </div>
-                </div>
-                <div class="pdf-container" id="pdf-container">
-                    <div class="pdf-wrapper" id="pdf-wrapper">
-                        <img class="pdf-image" id="pdf-image" src="" alt="PDF Page">
-                    </div>
-                </div>
-                <div class="instructions">
-                    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate pages
-                </div>
-            `;
-
-            // Create data panel
-            const dataPanel = document.createElement('div');
-            dataPanel.className = 'data-panel';
-            dataPanel.id = 'data-panel';
-            dataPanel.innerHTML = `
-                <div class="panel-header">
-                    <span class="panel-title">Extracted Products</span>
-                    <span id="page-product-count" style="font-size: 12px; color: #888;">0 products on this page</span>
-                </div>
-                <div class="products-container" id="products-container">
-                </div>
-                <div class="verification-panel" id="verification-panel">
-                    <div class="verification-header">
-                        <span class="field-label" id="field-label">Item #</span>
-                        <div class="verification-progress">
-                            <span>Field <span class="current" id="field-progress">1/5</span></span>
-                            <span style="margin-left: 15px;">Product <span class="current" id="product-progress">1/28</span></span>
-                        </div>
-                    </div>
-                    <div class="verification-input-container">
-                        <input type="text" class="verification-input" id="verification-input" placeholder="Field value...">
-                    </div>
-                    <div class="verification-actions">
-                        <button class="btn btn-secondary" onclick="prevField()">&larr; Prev</button>
-                        <button class="btn btn-secondary" onclick="skipField()">Skip</button>
-                        <button class="btn btn-primary" onclick="confirmField()">Confirm &rarr;</button>
-                    </div>
-                    <div class="verification-shortcuts">
-                        <kbd>Enter</kbd> Confirm &nbsp;|&nbsp;
-                        <kbd>Tab</kbd> Skip &nbsp;|&nbsp;
-                        <kbd>&larr;</kbd> <kbd>&rarr;</kbd> Navigate &nbsp;|&nbsp;
-                        <kbd>Esc</kbd> Exit
-                    </div>
-                </div>
-            `;
-
-            mainContainer.appendChild(pdfPanel);
-            mainContainer.appendChild(dataPanel);
         }
 
         // ============================================
@@ -1362,14 +1226,17 @@
                 return;
             }
 
-            container.innerHTML = products.map((p, i) => `
+            container.innerHTML = products.map((p, i) => {
+                // Escape ID for use in attributes (IDs are UUIDs but be safe)
+                const safeId = escapeHtml(p.id);
+                return `
                 <div class="product-card ${selectedProductId === p.id ? 'selected' : ''}"
-                     data-id="${p.id}" onclick="selectProduct('${p.id}')">
+                     data-id="${safeId}" onclick="selectProduct('${safeId}')">
                     <div class="product-header">
-                        <span class="product-item-no">#${p.item_no || '?'}</span>
+                        <span class="product-item-no">#${escapeHtml(p.item_no) || '?'}</span>
                         <div class="product-actions">
-                            <button onclick="event.stopPropagation(); editProduct('${p.id}')">Edit</button>
-                            <button onclick="event.stopPropagation(); deleteProduct('${p.id}')">Delete</button>
+                            <button onclick="event.stopPropagation(); editProduct('${safeId}')">Edit</button>
+                            <button onclick="event.stopPropagation(); deleteProduct('${safeId}')">Delete</button>
                         </div>
                     </div>
                     <div class="product-name">${escapeHtml(p.product_name)}</div>
@@ -1380,15 +1247,16 @@
                         </div>
                         <div class="product-detail">
                             <label>Pkg:</label>
-                            <span>${p.pkg || '-'}</span>
+                            <span>${escapeHtml(p.pkg) || '-'}</span>
                         </div>
                         <div class="product-detail">
                             <label>UOM:</label>
-                            <span>${p.uom || '-'}</span>
+                            <span>${escapeHtml(p.uom) || '-'}</span>
                         </div>
                     </div>
                 </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
         function selectProduct(id) {
@@ -1530,7 +1398,6 @@
                 const result = await response.json();
                 if (result.success) {
                     showToast(`Exported ${result.products_count} products to CSV`, 'success');
-                    loadCatalogs(); // Refresh to show exported status
                 } else {
                     showToast('Error exporting CSV', 'error');
                 }
