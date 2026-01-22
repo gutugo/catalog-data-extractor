@@ -153,14 +153,27 @@ def is_valid_item_no(value: str) -> bool:
 
 
 def is_header_row(row: list[str]) -> bool:
-    """Check if row is a table header."""
+    """Check if row is a table header.
+
+    Requires at least 2 header-like cells to avoid false positives
+    on product rows that happen to contain words like "Description".
+    """
+    header_count = 0
+    non_empty_count = 0
+
     for cell in row:
         if not cell:
             continue
+        non_empty_count += 1
         for pattern in HEADER_PATTERNS:
             if pattern.match(cell.strip()):
-                return True
-    return False
+                header_count += 1
+                break
+
+    # Require at least 2 header cells, or majority of cells if row has 2-3 cells
+    if non_empty_count <= 3:
+        return header_count >= 2
+    return header_count >= 2
 
 
 def should_skip_row(row: list[str]) -> bool:
@@ -553,7 +566,8 @@ class AutoExtractor:
         self.pdf_path = Path(pdf_path)
         self.session_dir = session_dir
         self.multi_method = multi_method
-        self.fallback_pages: list[int] = []  # Track pages that needed text fallback
+        self.fallback_pages: list[int] = []  # Track pages that needed text fallback (single-method)
+        self.empty_pages: list[int] = []  # Track pages with no products found (multi-method)
 
     def run(self, progress_callback=None, show_console=True) -> ExtractionSession:
         """Run automatic extraction on all pages.
@@ -620,6 +634,11 @@ class AutoExtractor:
                     if len(self.fallback_pages) <= 10:
                         console.print(f"[dim]Fallback pages: {self.fallback_pages}[/dim]")
 
+                if self.empty_pages:
+                    console.print(f"[yellow]Note: {len(self.empty_pages)} pages had no products extracted[/yellow]")
+                    if len(self.empty_pages) <= 10:
+                        console.print(f"[dim]Empty pages: {self.empty_pages}[/dim]")
+
         return session
 
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
@@ -666,9 +685,9 @@ class AutoExtractor:
         # 4. Merge results - pick best confidence per product
         merged = self._merge_extractions(*all_products)
 
-        # If no products found, track as fallback page
+        # If no products found by any method, track as empty page
         if not merged:
-            self.fallback_pages.append(page_num)
+            self.empty_pages.append(page_num)
 
         return merged
 
@@ -731,6 +750,7 @@ class AutoExtractor:
         # Update confidence for pdfminer extraction
         # Note: Position data from pdfminer is not used since regex fallback
         # doesn't track which text corresponds to which field
+        # Only set confidence if no existing location or if existing has lower confidence
         for product in products:
             for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
                 if field_name not in product.field_locations:
@@ -739,6 +759,9 @@ class AutoExtractor:
                         page_number=page_num,
                         confidence=CONFIDENCE_PDFMINER
                     )
+                elif product.field_locations[field_name].confidence > CONFIDENCE_PDFMINER:
+                    # Keep existing higher confidence
+                    pass
                 else:
                     product.field_locations[field_name].confidence = CONFIDENCE_PDFMINER
 

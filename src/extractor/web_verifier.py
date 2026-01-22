@@ -30,6 +30,7 @@ _state: dict = {
     'session_dir': None,
     'pdf_doc': None,
     'dashboard_mode': False,  # True when no catalog is loaded initially
+    'product_index': None,  # Cached dict of product_id -> index for O(1) lookup
 }
 
 # Lock for thread-safe access to _state
@@ -189,12 +190,13 @@ def index():
                                 _state['pdf_path'] = pdf_path
                                 _state['session'] = session
                                 _state['dashboard_mode'] = False
+                                _state['product_index'] = None  # New session
                                 # Close old doc after state update
                                 if old_doc:
                                     try:
                                         old_doc.close()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        print(f"Warning: Error closing old PDF: {e}", file=sys.stderr)
                             except Exception as e:
                                 print(f"Warning: Failed to open PDF {pdf_path}: {e}", file=sys.stderr)
 
@@ -229,9 +231,12 @@ def index():
 def get_catalogs():
     """List all catalogs with status."""
     catalogs = list_catalogs()
+    # Thread-safe access to _state
+    with _state_lock:
+        active = _state['session'].source_file if _state['session'] else None
     return jsonify({
         'catalogs': catalogs,
-        'active': _state['session'].source_file if _state['session'] else None,
+        'active': active,
     })
 
 
@@ -355,9 +360,10 @@ def get_extraction_status(catalog_name: str):
     with _extraction_lock:
         if catalog_name in _extraction_jobs:
             job = _extraction_jobs[catalog_name]
+            progress = job.get('progress')
             return jsonify({
                 'status': job['status'],
-                'progress': job['progress'].copy(),
+                'progress': progress.copy() if progress else {},
                 'error': job.get('error'),
             })
 
@@ -419,6 +425,7 @@ def switch_catalog(catalog_name: str):
         _state['session'] = session
         _state['pdf_doc'] = new_pdf_doc
         _state['dashboard_mode'] = False
+        _invalidate_product_index()  # New session, new index
 
     return jsonify({
         'success': True,
@@ -513,11 +520,41 @@ def get_page_image(page_num: int):
     )
 
 
+def _build_product_index(session: ExtractionSession) -> dict[str, int]:
+    """Build an index of product_id -> list index for O(1) lookup."""
+    return {p.id: i for i, p in enumerate(session.products)}
+
+
+def _invalidate_product_index():
+    """Invalidate the cached product index (call after add/delete)."""
+    _state['product_index'] = None
+
+
 def _find_product_by_id(session: ExtractionSession, product_id: str) -> tuple[Product | None, int]:
-    """Find a product by its ID. Returns (product, index) or (None, -1)."""
-    for i, p in enumerate(session.products):
-        if p.id == product_id:
-            return p, i
+    """Find a product by its ID. Returns (product, index) or (None, -1).
+
+    Uses cached index for O(1) lookup instead of O(n) linear search.
+
+    IMPORTANT: Must be called while holding _state_lock to ensure thread safety.
+    """
+    # Build or use cached index
+    if _state['product_index'] is None:
+        _state['product_index'] = _build_product_index(session)
+
+    index = _state['product_index'].get(product_id)
+    if index is not None and index < len(session.products):
+        product = session.products[index]
+        # Verify the product ID matches (in case index is stale)
+        if product.id == product_id:
+            return product, index
+
+    # Index miss or stale - rebuild and try again
+    _state['product_index'] = _build_product_index(session)
+    index = _state['product_index'].get(product_id)
+    # Add bounds check after rebuild
+    if index is not None and index < len(session.products):
+        return session.products[index], index
+
     return None, -1
 
 
@@ -582,6 +619,7 @@ def add_product():
         )
 
         session.add_product(product)
+        _invalidate_product_index()  # Index changed
         result = {
             'success': True,
             'index': len(session.products) - 1,
@@ -604,6 +642,7 @@ def delete_product(product_id: str):
             return jsonify({'error': 'Product not found'}), 404
 
         deleted = session.products.pop(index)
+        _invalidate_product_index()  # Index changed
         result = deleted.to_dict()
 
     return jsonify({'success': True, 'deleted': result})

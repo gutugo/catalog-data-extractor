@@ -1124,18 +1124,22 @@
                 return data;
             };
 
-            // Poll until done
-            while (true) {
+            // Poll until done (max 10 minutes = 1200 attempts at 500ms each)
+            const maxAttempts = 1200;
+            let attempts = 0;
+
+            while (attempts < maxAttempts) {
+                attempts++;
                 try {
                     const data = await checkStatus();
 
                     if (data.status === 'extracting') {
                         const p = data.progress;
-                        if (p.total_pages > 0) {
+                        if (p && p.total_pages > 0) {
                             showToast(`Extracting: page ${p.page}/${p.total_pages} (${p.products} products)`, 'success');
                         }
                     } else if (data.status === 'completed') {
-                        showToast(`Done! ${data.progress.products} products. Reloading...`, 'success');
+                        showToast(`Done! ${data.progress?.products || 0} products. Reloading...`, 'success');
                         setTimeout(() => {
                             window.location.href = '/?catalog=' + encodeURIComponent(name);
                         }, 500);
@@ -1143,6 +1147,12 @@
                     } else if (data.status === 'error') {
                         showToast('Extraction failed: ' + (data.error || 'Unknown error'), 'error');
                         loadCatalogs(); // Refresh list
+                        return;
+                    } else {
+                        // Unknown status - log and exit to prevent infinite loop
+                        console.warn('Unknown extraction status:', data.status);
+                        showToast('Extraction status unknown. Refreshing...', 'error');
+                        loadCatalogs();
                         return;
                     }
                 } catch (err) {
@@ -1153,6 +1163,10 @@
                 // Wait 500ms before next poll
                 await new Promise(r => setTimeout(r, 500));
             }
+
+            // Timeout after max attempts
+            showToast('Extraction timed out. Please check status manually.', 'error');
+            loadCatalogs();
         }
 
         // ============================================
@@ -1173,15 +1187,19 @@
             pdfImage.src = `/api/page/${pageNum}/image?zoom=${currentZoom}`;
 
             // Wait for image to load (with error handling)
+            let imageLoaded = true;
             await new Promise((resolve, reject) => {
                 pdfImage.onload = resolve;
                 pdfImage.onerror = () => {
                     showToast('Failed to load page image', 'error');
                     reject(new Error('Image load failed'));
                 };
-            }).catch(() => {});
+            }).catch((err) => {
+                console.error('Image load error:', err);
+                imageLoaded = false;
+            });
 
-            // Load products
+            // Load products (even if image failed, so user can still see/edit data)
             try {
                 const response = await fetch(`/api/page/${pageNum}`);
                 const data = await response.json();
@@ -1191,6 +1209,11 @@
                 showToast('Failed to load products', 'error');
                 products = [];
                 renderProducts();
+            }
+
+            // Show additional warning if image failed but products loaded
+            if (!imageLoaded && products.length > 0) {
+                showToast('Products loaded but PDF image unavailable', 'error');
             }
         }
 
@@ -1240,16 +1263,16 @@
             }
 
             container.innerHTML = products.map((p, i) => {
-                // Escape ID for use in attributes (IDs are UUIDs but be safe)
+                // Escape ID for use in data attributes (IDs are UUIDs but be safe)
                 const safeId = escapeHtml(p.id);
                 return `
                 <div class="product-card ${selectedProductId === p.id ? 'selected' : ''}"
-                     data-id="${safeId}" onclick="selectProduct('${safeId}')">
+                     data-id="${safeId}" data-action="select">
                     <div class="product-header">
                         <span class="product-item-no">#${escapeHtml(p.item_no) || '?'}</span>
                         <div class="product-actions">
-                            <button onclick="event.stopPropagation(); editProduct('${safeId}')">Edit</button>
-                            <button onclick="event.stopPropagation(); deleteProduct('${safeId}')">Delete</button>
+                            <button data-action="edit" data-id="${safeId}">Edit</button>
+                            <button data-action="delete" data-id="${safeId}">Delete</button>
                         </div>
                     </div>
                     <div class="product-name">${escapeHtml(p.product_name)}</div>
@@ -1270,6 +1293,25 @@
                 </div>
                 `;
             }).join('');
+
+            // Use event delegation for product actions (XSS-safe)
+            container.querySelectorAll('.product-card').forEach(card => {
+                card.addEventListener('click', function(e) {
+                    const target = e.target;
+                    const action = target.dataset.action;
+                    const id = target.dataset.id || this.dataset.id;
+
+                    if (action === 'edit') {
+                        e.stopPropagation();
+                        editProduct(id);
+                    } else if (action === 'delete') {
+                        e.stopPropagation();
+                        deleteProduct(id);
+                    } else if (this.dataset.action === 'select') {
+                        selectProduct(id);
+                    }
+                });
+            });
         }
 
         function selectProduct(id) {
