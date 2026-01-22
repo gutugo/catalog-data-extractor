@@ -79,6 +79,16 @@ uv run extractor export <catalog-name>
 
 Session files are stored as JSON in `processed/sessions/`. The `from_dict()` methods handle missing optional fields gracefully, while required fields (`source_file`, `total_pages`) raise clear KeyError messages if missing.
 
+### cli.py
+- `_validate_source_file_path()` - Validates PDF paths to prevent path traversal
+  - Strips directory components from `source_file`
+  - Verifies resolved path stays within allowed directory
+
+### data_model.py
+- Atomic session saves with temp file + rename
+- Windows compatibility: fallback to unlink+rename if `os.replace()` fails
+- Product IDs preserved on reload (only generates new ID if truly `None`)
+
 ### FieldLocation
 Each extracted field can have an associated `FieldLocation` storing its source position on the PDF:
 - `x0, y0, x1, y1` - Bounding box in PDF coordinates
@@ -109,16 +119,25 @@ CSV output columns:
 - `extract_text_with_layout()` - Text block extraction using pdfminer.six
   - Returns text blocks with bounding boxes and individual lines
   - Uses LAParams for layout analysis
+- `ExtractionWarning` - Class for tracking extraction failures programmatically
+  - `add(message)` - Record a warning
+  - `get_all()` - Get all warnings
+  - `clear()` - Clear warnings
 
 ### auto_extractor.py
 - `find_count_column()` - Dynamically detects which table column contains count data
   - Requires ≥50% match rate for tables with 3+ rows
   - Requires 100% match rate for small tables (1-2 rows)
   - Works with both string lists and dict lists (with `text`/`bbox` keys)
+- `is_header_row()` - Detects table header rows
+  - Small rows (≤3 cells): requires majority to be header-like
+  - Larger rows: requires at least 2 header cells
 - `parse_count_uom()` - Parses "1,000 ct." → (pkg="1000", uom="ct")
 - `extract_products_from_table()` - Table-aware extraction with field position capture
   - Creates `FieldLocation` objects for each extracted field from cell bboxes
 - `extract_products_from_text_fallback()` - Regex fallback for non-table pages
+  - Section header detection: skips ALL CAPS lines to avoid false positives
+  - Multi-line pattern works with or without pending description
 - UOM patterns are synchronized across all extraction methods (COUNT_UOM_PATTERN, PRODUCT_LINE_PATTERN, MULTILINE_ITEM_PATTERN, find_count_column)
 
 #### Multi-Method Extraction (`--multi` flag)
@@ -138,8 +157,14 @@ When enabled, uses multiple extraction methods and merges results:
 - `/api/stats` - Get total product count and session info
 - `/api/save` - Save session to disk
 - `/api/export-csv` - Export session to CSV file
-- `/api/shutdown` - Graceful server shutdown
+- `/api/shutdown` - Graceful server shutdown (uses SIGINT for safe cleanup)
 - PDF document auto-cleanup on exit via atexit
+
+#### Security & Resource Management
+- `_validate_catalog_name()` - Prevents path traversal using `secure_filename`
+- `_cleanup_completed_jobs()` - Removes finished extraction jobs after 5 minutes
+- Explicit pixmap memory cleanup after page rendering
+- Thread-safe state access with `_state_lock` and `_extraction_lock`
 
 ### verify.html (Web Verification UI)
 - **Header Actions**:
