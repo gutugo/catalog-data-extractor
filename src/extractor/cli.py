@@ -12,6 +12,35 @@ from .extractor import InteractiveExtractor
 from .auto_extractor import AutoExtractor
 from .verifier import Verifier
 from .exporter import export_to_csv, display_extraction_summary, display_status
+
+
+def _validate_source_file_path(source_file: str, base_dir: Path) -> Path | None:
+    """Validate that source_file resolves to a path within base_dir.
+
+    Prevents path traversal attacks where source_file contains '../' etc.
+    Returns the resolved path if valid, None otherwise.
+    """
+    if not source_file:
+        return None
+
+    # Get just the filename, stripping any directory components
+    filename = Path(source_file).name
+
+    # Ensure it's a PDF
+    if not filename.lower().endswith('.pdf'):
+        return None
+
+    # Build the path and resolve it
+    candidate = (base_dir / filename).resolve()
+
+    # Verify the resolved path is within base_dir
+    try:
+        candidate.relative_to(base_dir.resolve())
+    except ValueError:
+        # Path escaped base_dir
+        return None
+
+    return candidate
 # web_verifier imported lazily in web_verify command to avoid Flask dependency for other commands
 
 app = typer.Typer(
@@ -126,13 +155,13 @@ def resume(
         display_extraction_summary(session)
         raise typer.Exit(0)
 
-    # Find the original PDF
-    pdf_path = CATALOGS_DIR / session.source_file
-    if not pdf_path.exists():
+    # Find the original PDF (with path traversal protection)
+    pdf_path = _validate_source_file_path(session.source_file, CATALOGS_DIR)
+    if pdf_path is None or not pdf_path.exists():
         # Try to find it in current directory
-        pdf_path = BASE_DIR / session.source_file
+        pdf_path = _validate_source_file_path(session.source_file, BASE_DIR)
 
-    if not pdf_path.exists():
+    if pdf_path is None or not pdf_path.exists():
         console.print(f"[red]Cannot find original PDF:[/red] {session.source_file}")
         console.print("[dim]Please ensure the PDF is in the catalogs/ directory[/dim]")
         raise typer.Exit(1)
@@ -290,12 +319,12 @@ def verify(
         console.print(f"[red]Failed to load session:[/red] {session_path}")
         raise typer.Exit(1)
 
-    # Find the original PDF
-    pdf_path = CATALOGS_DIR / session.source_file
-    if not pdf_path.exists():
-        pdf_path = BASE_DIR / session.source_file
+    # Find the original PDF (with path traversal protection)
+    pdf_path = _validate_source_file_path(session.source_file, CATALOGS_DIR)
+    if pdf_path is None or not pdf_path.exists():
+        pdf_path = _validate_source_file_path(session.source_file, BASE_DIR)
 
-    if not pdf_path.exists():
+    if pdf_path is None or not pdf_path.exists():
         console.print(f"[red]Cannot find original PDF:[/red] {session.source_file}")
         raise typer.Exit(1)
 
@@ -374,12 +403,12 @@ def web_verify(
         console.print(f"[red]Failed to load session:[/red] {session_path}")
         raise typer.Exit(1)
 
-    # Find the original PDF
-    pdf_path = CATALOGS_DIR / session.source_file
-    if not pdf_path.exists():
-        pdf_path = BASE_DIR / session.source_file
+    # Find the original PDF (with path traversal protection)
+    pdf_path = _validate_source_file_path(session.source_file, CATALOGS_DIR)
+    if pdf_path is None or not pdf_path.exists():
+        pdf_path = _validate_source_file_path(session.source_file, BASE_DIR)
 
-    if not pdf_path.exists():
+    if pdf_path is None or not pdf_path.exists():
         console.print(f"[red]Cannot find original PDF:[/red] {session.source_file}")
         raise typer.Exit(1)
 

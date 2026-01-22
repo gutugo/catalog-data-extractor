@@ -122,9 +122,14 @@ class Verifier:
         """Delete a product by index (1-based)."""
         products = self.products_by_page.get(page_num, [])
         if 1 <= index <= len(products):
-            # Use pop() for reliable index-based removal
+            # Get product from page list
             product = products.pop(index - 1)
-            self.session.products.remove(product)
+            # Find and remove from session by ID to avoid ambiguity
+            # if the same product object appears multiple times
+            for i, p in enumerate(self.session.products):
+                if p.id == product.id:
+                    self.session.products.pop(i)
+                    break
             return True
         return False
 

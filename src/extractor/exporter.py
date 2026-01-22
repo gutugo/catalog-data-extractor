@@ -86,10 +86,13 @@ def display_extraction_summary(session: ExtractionSession) -> None:
         products_table.add_column("Page")
 
         for i, product in enumerate(session.products, 1):
+            # Defensive: handle None product_name (shouldn't happen with dataclass defaults)
+            name = product.product_name or ""
+            display_name = name[:50] + "..." if len(name) > 50 else name
             products_table.add_row(
                 str(i),
-                product.product_name[:50] + "..." if len(product.product_name) > 50 else product.product_name,
-                product.item_no,
+                display_name,
+                product.item_no or "",
                 str(product.page_number),
             )
 

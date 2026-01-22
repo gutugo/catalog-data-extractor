@@ -93,6 +93,10 @@ class Product:
             for field_name, loc_data in data['field_locations'].items():
                 field_locations[field_name] = FieldLocation.from_dict(loc_data)
 
+        # Handle ID: only generate new one if truly missing (None), not for empty string
+        existing_id = data.get("id")
+        product_id = existing_id if existing_id is not None else _generate_id()
+
         return cls(
             product_name=data.get("product_name", ""),
             description=data.get("description", ""),
@@ -101,7 +105,7 @@ class Product:
             uom=data.get("uom", ""),
             page_number=data.get("page_number", 0),
             source_file=data.get("source_file", ""),
-            id=data.get("id") or _generate_id(),
+            id=product_id,
             field_locations=field_locations,
         )
 
@@ -166,8 +170,15 @@ class ExtractionSession:
         try:
             with os.fdopen(fd, 'w') as f:
                 json.dump(self.to_dict(), f, indent=2)
-            # Atomic rename (on POSIX systems)
-            os.replace(temp_path, session_path)
+            # Atomic rename - os.replace works on POSIX; on Windows it may fail
+            # if destination has certain attributes, so we handle that case
+            try:
+                os.replace(temp_path, session_path)
+            except OSError:
+                # Windows fallback: delete destination first, then rename
+                if session_path.exists():
+                    session_path.unlink()
+                os.rename(temp_path, session_path)
         except Exception:
             # Clean up temp file on failure
             try:

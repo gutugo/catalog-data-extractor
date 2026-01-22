@@ -170,9 +170,10 @@ def is_header_row(row: list[str]) -> bool:
                 header_count += 1
                 break
 
-    # Require at least 2 header cells, or majority of cells if row has 2-3 cells
+    # Require at least 2 header cells for larger rows
+    # For small rows (2-3 cells), require majority to be headers
     if non_empty_count <= 3:
-        return header_count >= 2
+        return header_count >= (non_empty_count // 2 + 1)  # Majority
     return header_count >= 2
 
 
@@ -400,24 +401,27 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
             i += 1
             continue
 
-        # Try multi-line item pattern
+        # Try multi-line item pattern (works with or without pending description)
         multi_match = MULTILINE_ITEM_PATTERN.match(line)
-        if multi_match and pending_description:
+        if multi_match:
             item_no = multi_match.group(1)
             count_str = multi_match.group(2).strip()
-            product_name = ' '.join(pending_description)
+            # Use pending description if available, otherwise use empty string
+            product_name = ' '.join(pending_description) if pending_description else ''
 
             pkg, uom = parse_count_uom(count_str)
 
-            products.append(Product(
-                product_name=product_name,
-                description=count_str,
-                item_no=item_no,
-                pkg=pkg,
-                uom=uom,
-                page_number=page.page_number,
-                source_file=source_file,
-            ))
+            # Only create product if we have at least an item_no
+            if item_no:
+                products.append(Product(
+                    product_name=product_name,
+                    description=count_str,
+                    item_no=item_no,
+                    pkg=pkg,
+                    uom=uom,
+                    page_number=page.page_number,
+                    source_file=source_file,
+                ))
             pending_description = []
             i += 1
             continue
@@ -548,9 +552,14 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
 
         # Could be part of multi-line product name
         if not line.startswith('$') and not re.match(r'^\d+$', line):
-            # Don't accumulate section headers (capitalized multi-word phrases)
-            # Short lines (<=3 chars) are unlikely to be meaningful headers
-            is_section_header = re.match(r'^[A-Z][a-zA-Z\s&,\-]+$', line) and len(line) > 3
+            # Don't accumulate section headers - must be ALL CAPS or match common header patterns
+            # This avoids false positives on product names like "Baby Wipes" or "Hand Soap"
+            is_section_header = (
+                # All uppercase words (e.g., "CLEANING SUPPLIES", "OFFICE PRODUCTS")
+                (re.match(r'^[A-Z][A-Z\s&,\-]+$', line) and len(line) > 3) or
+                # Common catalog section header patterns
+                re.match(r'^(Page \d+|Section \d+|Category:|Index|Table of Contents)$', line, re.IGNORECASE)
+            )
             if not is_section_header:
                 pending_description.append(line)
 

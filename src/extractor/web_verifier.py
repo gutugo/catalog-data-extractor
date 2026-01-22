@@ -55,6 +55,22 @@ def cleanup_pdf():
             _state['pdf_doc'] = None
 
 
+def _cleanup_completed_jobs():
+    """Remove completed/errored jobs older than 5 minutes to prevent memory leaks."""
+    import time
+    current_time = time.time()
+    with _extraction_lock:
+        to_remove = []
+        for name, job in _extraction_jobs.items():
+            if job['status'] != 'extracting':
+                # Remove completed/errored jobs after 5 minutes
+                job_time = job.get('completed_at', current_time)
+                if current_time - job_time > 300:  # 5 minutes
+                    to_remove.append(name)
+        for name in to_remove:
+            del _extraction_jobs[name]
+
+
 def list_catalogs() -> list[dict]:
     """List catalogs that exist in /catalogs directory.
 
@@ -69,11 +85,8 @@ def list_catalogs() -> list[dict]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     EXTRACTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Clean up completed/errored extraction jobs (prevent memory leak)
-    with _extraction_lock:
-        to_remove = [k for k, v in _extraction_jobs.items() if v['status'] != 'extracting']
-        for k in to_remove:
-            del _extraction_jobs[k]
+    # Clean up old completed/errored extraction jobs (prevent memory leak)
+    _cleanup_completed_jobs()
 
     # Find all PDFs in catalogs directory (ONLY these will be shown)
     pdf_files = {}
@@ -160,6 +173,29 @@ def init_app(pdf_path: Path = None, session: ExtractionSession = None,
     return app
 
 
+def _validate_catalog_name(catalog_name: str) -> str | None:
+    """Validate and sanitize catalog name to prevent path traversal.
+
+    Returns sanitized name or None if invalid.
+    """
+    if not catalog_name:
+        return None
+
+    # Use secure_filename for robust sanitization
+    sanitized = secure_filename(catalog_name)
+    if not sanitized:
+        return None
+
+    # Remove any extension that might have been added
+    sanitized = Path(sanitized).stem
+
+    # Verify it doesn't try to escape (double-check after sanitization)
+    if not sanitized or sanitized.startswith('.') or '/' in sanitized or '\\' in sanitized:
+        return None
+
+    return sanitized
+
+
 @app.route('/')
 def index():
     """Main verification page."""
@@ -167,9 +203,8 @@ def index():
     catalog_name = request.args.get('catalog')
     if catalog_name:
         # Validate catalog_name to prevent path traversal
-        if '/' in catalog_name or '\\' in catalog_name or '..' in catalog_name:
-            catalog_name = None
-        else:
+        catalog_name = _validate_catalog_name(catalog_name)
+        if catalog_name:
             # Load session and switch catalog within lock to prevent race conditions
             with _state_lock:
                 session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
@@ -331,16 +366,20 @@ def start_extraction(catalog_name: str):
             extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
             session = extractor.run(progress_callback=progress_callback, show_console=False)
 
+            import time as _time
             with _extraction_lock:
                 _extraction_jobs[catalog_name]['status'] = 'completed'
                 _extraction_jobs[catalog_name]['progress']['products'] = len(session.products)
+                _extraction_jobs[catalog_name]['completed_at'] = _time.time()
         except Exception as e:
             # Log full stack trace for debugging
             error_msg = f"{e}\n{traceback.format_exc()}"
             print(f"Extraction error for {catalog_name}: {error_msg}", file=sys.stderr)
+            import time as _time
             with _extraction_lock:
                 _extraction_jobs[catalog_name]['status'] = 'error'
                 _extraction_jobs[catalog_name]['error'] = str(e)
+                _extraction_jobs[catalog_name]['completed_at'] = _time.time()
 
     # Start extraction in background thread
     thread = threading.Thread(target=run_extraction, daemon=True)
@@ -356,6 +395,9 @@ def start_extraction(catalog_name: str):
 @app.route('/api/extract/<catalog_name>/status')
 def get_extraction_status(catalog_name: str):
     """Get extraction progress for a catalog."""
+    # Cleanup old completed jobs periodically
+    _cleanup_completed_jobs()
+
     # Thread-safe access to _extraction_jobs
     with _extraction_lock:
         if catalog_name in _extraction_jobs:
@@ -509,6 +551,8 @@ def get_page_image(page_num: int):
 
             pix = page.get_pixmap(matrix=mat)
             img_bytes = pix.tobytes('png')
+            # Explicitly free pixmap memory to prevent accumulation
+            del pix
         except Exception as e:
             print(f"Error rendering page {page_num}: {e}", file=sys.stderr)
             return jsonify({'error': f'Failed to render page: {e}'}), 500
@@ -724,17 +768,17 @@ def shutdown():
         if session and session_dir:
             session.save(session_dir)
 
-    # Schedule shutdown
-    func = request.environ.get('werkzeug.server.shutdown')
-    if func:
-        func()
-    else:
-        # For newer versions of werkzeug, use os._exit
-        import time
-        def shutdown_server():
-            time.sleep(0.5)
-            os._exit(0)
-        threading.Thread(target=shutdown_server).start()
+    # Schedule shutdown using signal-based approach for safety
+    import signal
+    import time
+
+    def shutdown_server():
+        time.sleep(0.5)
+        # Use SIGINT for graceful shutdown instead of os._exit
+        # This allows cleanup handlers to run properly
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=shutdown_server, daemon=True).start()
 
     return jsonify({'success': True, 'message': 'Server shutting down'})
 

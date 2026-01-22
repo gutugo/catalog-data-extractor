@@ -11,6 +11,26 @@ from pdfminer.layout import LAParams, LTTextBoxHorizontal, LTTextLineHorizontal
 
 from .data_model import PageContent
 
+
+class ExtractionWarning:
+    """Tracks extraction warnings for diagnostic purposes."""
+    _warnings: list[str] = []
+
+    @classmethod
+    def add(cls, message: str):
+        """Add a warning message."""
+        cls._warnings.append(message)
+
+    @classmethod
+    def get_all(cls) -> list[str]:
+        """Get all warning messages."""
+        return cls._warnings.copy()
+
+    @classmethod
+    def clear(cls):
+        """Clear all warnings."""
+        cls._warnings.clear()
+
 # Camelot is optional - only imported when needed
 try:
     import camelot
@@ -58,7 +78,9 @@ class PDFReader:
             raw_text = page.extract_text() or ""
         except Exception as e:
             # Handle encrypted pages, malformed content, etc.
-            print(f"Warning: Failed to extract text from page {page_number}: {e}", file=sys.stderr)
+            warning_msg = f"Failed to extract text from page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
             raw_text = ""
 
         # Split into lines and clean up
@@ -96,7 +118,9 @@ class PDFReader:
             tables = page.extract_tables() or []
         except Exception as e:
             # Handle extraction failures gracefully
-            print(f"Warning: Failed to extract tables from page {page_number}: {e}", file=sys.stderr)
+            warning_msg = f"Failed to extract tables from page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
             return []
 
         # Clean up table cells
@@ -136,7 +160,9 @@ class PDFReader:
         try:
             tables = page.find_tables()
         except Exception as e:
-            print(f"Warning: Failed to find tables on page {page_number}: {e}", file=sys.stderr)
+            warning_msg = f"Failed to find tables on page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
             return []
 
         result = []
@@ -210,7 +236,9 @@ class PDFReader:
                 flavor='stream'
             )
         except Exception as e:
-            print(f"Warning: Camelot failed on page {page_number}: {e}", file=sys.stderr)
+            warning_msg = f"Camelot failed on page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
             return []
 
         result = []
@@ -307,7 +335,9 @@ class PDFReader:
                                 'lines': lines
                             })
         except Exception as e:
-            print(f"Warning: pdfminer failed on page {page_number}: {e}", file=sys.stderr)
+            warning_msg = f"pdfminer failed on page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
 
         return result
 
