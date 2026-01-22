@@ -93,9 +93,10 @@ class Product:
             for field_name, loc_data in data['field_locations'].items():
                 field_locations[field_name] = FieldLocation.from_dict(loc_data)
 
-        # Handle ID: only generate new one if truly missing (None), not for empty string
+        # Handle ID: generate new one if missing (None) or empty string
+        # Empty string IDs would make products unfindable, so treat them as missing
         existing_id = data.get("id")
-        product_id = existing_id if existing_id is not None else _generate_id()
+        product_id = existing_id if existing_id else _generate_id()
 
         return cls(
             product_name=data.get("product_name", ""),
@@ -183,8 +184,9 @@ class ExtractionSession:
             # Clean up temp file on failure
             try:
                 os.unlink(temp_path)
-            except OSError:
-                pass
+            except OSError as cleanup_err:
+                # Log cleanup failure but don't mask original exception
+                print(f"Warning: Failed to cleanup temp file {temp_path}: {cleanup_err}", file=sys.stderr)
             raise
 
         return session_path

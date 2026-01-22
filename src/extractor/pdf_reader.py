@@ -3,6 +3,7 @@
 from itertools import zip_longest
 from pathlib import Path
 import sys
+import threading
 from typing import Iterator, Optional
 
 import pdfplumber
@@ -13,23 +14,30 @@ from .data_model import PageContent
 
 
 class ExtractionWarning:
-    """Tracks extraction warnings for diagnostic purposes."""
+    """Tracks extraction warnings for diagnostic purposes.
+
+    Thread-safe implementation using a lock for concurrent access.
+    """
     _warnings: list[str] = []
+    _lock = threading.Lock()
 
     @classmethod
     def add(cls, message: str):
-        """Add a warning message."""
-        cls._warnings.append(message)
+        """Add a warning message (thread-safe)."""
+        with cls._lock:
+            cls._warnings.append(message)
 
     @classmethod
     def get_all(cls) -> list[str]:
-        """Get all warning messages."""
-        return cls._warnings.copy()
+        """Get all warning messages (thread-safe)."""
+        with cls._lock:
+            return cls._warnings.copy()
 
     @classmethod
     def clear(cls):
-        """Clear all warnings."""
-        cls._warnings.clear()
+        """Clear all warnings (thread-safe)."""
+        with cls._lock:
+            cls._warnings.clear()
 
 # Camelot is optional - only imported when needed
 try:
@@ -308,7 +316,7 @@ class PDFReader:
 
         try:
             # extract_pages yields page layouts
-            for page_idx, page_layout in enumerate(extract_pages(
+            for _page_idx, page_layout in enumerate(extract_pages(
                 str(self.pdf_path),
                 laparams=laparams,
                 page_numbers=[page_number - 1]  # 0-indexed

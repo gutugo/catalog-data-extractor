@@ -3,6 +3,7 @@
 import atexit
 import io
 import os
+import secrets
 import sys
 import traceback
 import threading
@@ -14,6 +15,10 @@ from werkzeug.utils import secure_filename
 
 from .data_model import Product, ExtractionSession, FieldLocation
 from .exporter import export_to_csv
+
+# Maximum length for product text fields to prevent resource exhaustion
+MAX_FIELD_LENGTH = 10000
+MAX_PRODUCT_NAME_LENGTH = 1000
 
 # Flask app - static_folder=None since we don't have static files
 app = Flask(__name__, template_folder='templates', static_folder=None)
@@ -42,6 +47,35 @@ _extraction_lock = threading.Lock()  # Thread lock for _extraction_jobs access
 
 # Track if cleanup has been registered
 _cleanup_registered = False
+
+# CSRF token for protecting state-changing endpoints
+_csrf_token: str = ""
+
+
+def _generate_csrf_token() -> str:
+    """Generate a new CSRF token."""
+    global _csrf_token
+    _csrf_token = secrets.token_urlsafe(32)
+    return _csrf_token
+
+
+def _verify_csrf_token(token: str | None) -> bool:
+    """Verify CSRF token matches."""
+    if not _csrf_token:
+        return True  # CSRF not initialized (shouldn't happen)
+    return token == _csrf_token
+
+
+def _sanitize_product_field(value: str | None, max_length: int = MAX_FIELD_LENGTH) -> str:
+    """Sanitize and truncate product field values."""
+    if value is None:
+        return ''
+    # Convert to string and strip whitespace
+    value = str(value).strip()
+    # Truncate if too long
+    if len(value) > max_length:
+        value = value[:max_length]
+    return value
 
 
 def cleanup_pdf():
@@ -164,6 +198,9 @@ def init_app(pdf_path: Path = None, session: ExtractionSession = None,
         _state['pdf_doc'] = None
         _state['dashboard_mode'] = True
 
+    # Generate CSRF token for this session
+    _generate_csrf_token()
+
     # Register cleanup on exit (only once)
     global _cleanup_registered
     if not _cleanup_registered:
@@ -247,6 +284,7 @@ def index():
             total_pages=0,
             total_products=0,
             dashboard_mode=True,
+            csrf_token=_csrf_token,
         )
 
     return render_template(
@@ -255,6 +293,7 @@ def index():
         total_pages=session.total_pages,
         total_products=len(session.products),
         dashboard_mode=False,
+        csrf_token=_csrf_token,
     )
 
 
@@ -275,9 +314,22 @@ def get_catalogs():
     })
 
 
+def _check_csrf() -> tuple[dict, int] | None:
+    """Check CSRF token from request. Returns error response tuple if invalid, None if valid."""
+    token = request.headers.get('X-CSRF-Token') or (request.json or {}).get('csrf_token')
+    if not _verify_csrf_token(token):
+        return {'error': 'Invalid CSRF token'}, 403
+    return None
+
+
 @app.route('/api/upload', methods=['POST'])
 def upload_catalog():
     """Upload a new PDF catalog."""
+    # CSRF check - for multipart forms, check header
+    token = request.headers.get('X-CSRF-Token')
+    if not _verify_csrf_token(token):
+        return jsonify({'error': 'Invalid CSRF token'}), 403
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
 
@@ -331,6 +383,15 @@ def upload_catalog():
 @app.route('/api/extract/<catalog_name>', methods=['POST'])
 def start_extraction(catalog_name: str):
     """Start auto-extraction for a catalog."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
+    # Validate catalog name to prevent path traversal
+    catalog_name = _validate_catalog_name(catalog_name)
+    if not catalog_name:
+        return jsonify({'error': 'Invalid catalog name'}), 400
+
     # Find the PDF first (before acquiring lock)
     pdf_path = CATALOGS_DIR / f"{catalog_name}.pdf"
     if not pdf_path.exists():
@@ -429,6 +490,15 @@ def get_extraction_status(catalog_name: str):
 @app.route('/api/switch/<catalog_name>', methods=['POST'])
 def switch_catalog(catalog_name: str):
     """Switch to a different catalog."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
+    # Validate catalog name to prevent path traversal
+    catalog_name = _validate_catalog_name(catalog_name)
+    if not catalog_name:
+        return jsonify({'error': 'Invalid catalog name'}), 400
+
     # Find session
     session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
     if not session_path.exists():
@@ -541,7 +611,7 @@ def get_page_image(page_num: int):
         try:
             page = pdf_doc[page_num - 1]
 
-            # Get zoom level from query params (default 2x for good quality)
+            # Get zoom level from query params (default 1x, range 1x-5x)
             try:
                 zoom = float(request.args.get('zoom', 1.0))
                 zoom = max(1.0, min(zoom, 5.0))  # Clamp between 1x and 5x
@@ -570,7 +640,12 @@ def _build_product_index(session: ExtractionSession) -> dict[str, int]:
 
 
 def _invalidate_product_index():
-    """Invalidate the cached product index (call after add/delete)."""
+    """Invalidate the cached product index (call after add/delete).
+
+    IMPORTANT: Must be called while holding _state_lock to ensure thread safety.
+    This function does not acquire the lock itself to avoid deadlocks when called
+    from code that already holds the lock.
+    """
     _state['product_index'] = None
 
 
@@ -605,6 +680,10 @@ def _find_product_by_id(session: ExtractionSession, product_id: str) -> tuple[Pr
 @app.route('/api/product/<product_id>', methods=['PUT'])
 def update_product(product_id: str):
     """Update a product's data."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     data = request.json
     if data is None:
         return jsonify({'error': 'Invalid JSON body'}), 400
@@ -618,17 +697,17 @@ def update_product(product_id: str):
         if product is None:
             return jsonify({'error': 'Product not found'}), 404
 
-        # Update fields
+        # Update fields with sanitization
         if 'product_name' in data:
-            product.product_name = data['product_name']
+            product.product_name = _sanitize_product_field(data['product_name'], MAX_PRODUCT_NAME_LENGTH)
         if 'description' in data:
-            product.description = data['description']
+            product.description = _sanitize_product_field(data['description'])
         if 'item_no' in data:
-            product.item_no = data['item_no']
+            product.item_no = _sanitize_product_field(data['item_no'], 100)
         if 'pkg' in data:
-            product.pkg = data['pkg']
+            product.pkg = _sanitize_product_field(data['pkg'], 50)
         if 'uom' in data:
-            product.uom = data['uom']
+            product.uom = _sanitize_product_field(data['uom'], 50)
 
         # Update field locations if provided
         if 'field_locations' in data and data['field_locations']:
@@ -643,6 +722,10 @@ def update_product(product_id: str):
 @app.route('/api/product', methods=['POST'])
 def add_product():
     """Add a new product."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     data = request.json
     if data is None:
         return jsonify({'error': 'Invalid JSON body'}), 400
@@ -652,13 +735,18 @@ def add_product():
         if session is None:
             return jsonify({'error': 'No catalog loaded'}), 400
 
+        # Sanitize page_number to prevent injection
+        page_number = data.get('page_number', 1)
+        if not isinstance(page_number, int) or page_number < 1:
+            page_number = 1
+
         product = Product(
-            product_name=data.get('product_name', ''),
-            description=data.get('description', ''),
-            item_no=data.get('item_no', ''),
-            pkg=data.get('pkg', ''),
-            uom=data.get('uom', ''),
-            page_number=data.get('page_number', 1),
+            product_name=_sanitize_product_field(data.get('product_name', ''), MAX_PRODUCT_NAME_LENGTH),
+            description=_sanitize_product_field(data.get('description', '')),
+            item_no=_sanitize_product_field(data.get('item_no', ''), 100),
+            pkg=_sanitize_product_field(data.get('pkg', ''), 50),
+            uom=_sanitize_product_field(data.get('uom', ''), 50),
+            page_number=page_number,
             source_file=session.source_file,
         )
 
@@ -676,6 +764,10 @@ def add_product():
 @app.route('/api/product/<product_id>', methods=['DELETE'])
 def delete_product(product_id: str):
     """Delete a product."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     with _state_lock:
         session = _state['session']
         if session is None:
@@ -695,6 +787,10 @@ def delete_product(product_id: str):
 @app.route('/api/save', methods=['POST'])
 def save_session():
     """Save the current session."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     with _state_lock:
         session = _state['session']
         session_dir = _state['session_dir']
@@ -711,6 +807,10 @@ def save_session():
 @app.route('/api/export-csv', methods=['POST'])
 def export_csv():
     """Export session to CSV file."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     with _state_lock:
         session = _state['session']
         session_dir = _state['session_dir']
@@ -760,6 +860,10 @@ def get_stats():
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():
     """Shutdown the server gracefully."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     with _state_lock:
         session = _state['session']
         session_dir = _state['session_dir']
@@ -786,6 +890,10 @@ def shutdown():
 @app.route('/api/extract-text', methods=['POST'])
 def extract_text_from_region():
     """Extract text from a selected region on a PDF page."""
+    csrf_error = _check_csrf()
+    if csrf_error:
+        return jsonify(csrf_error[0]), csrf_error[1]
+
     data = request.json
     if data is None:
         return jsonify({'error': 'Invalid JSON body'}), 400

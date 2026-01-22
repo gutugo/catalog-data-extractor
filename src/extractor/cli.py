@@ -377,13 +377,28 @@ def web_verify(
             border_style="blue"
         ))
 
-        # Open browser after a short delay
+        # Check if port is available before trying to open browser
+        import socket
         import webbrowser
         import threading
+
+        def is_port_available(host: str, port: int) -> bool:
+            """Check if a port is available for binding."""
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind((host, port))
+                    return True
+            except OSError:
+                return False
+
+        if not is_port_available(host, port):
+            console.print(f"[red]Error:[/red] Port {port} is already in use. Try a different port with --port.")
+            raise typer.Exit(1)
 
         def open_browser():
             webbrowser.open(f"http://{host}:{port}")
 
+        # Open browser after a short delay (port was verified available)
         threading.Timer(1.0, open_browser).start()
 
         # Run the web server in dashboard mode
@@ -420,14 +435,28 @@ def web_verify(
         border_style="blue"
     ))
 
-    # Open browser after a short delay to allow server to start
+    # Check if port is available before trying to open browser
+    import socket
     import webbrowser
     import threading
+
+    def is_port_available(host: str, port: int) -> bool:
+        """Check if a port is available for binding."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+                return True
+        except OSError:
+            return False
+
+    if not is_port_available(host, port):
+        console.print(f"[red]Error:[/red] Port {port} is already in use. Try a different port with --port.")
+        raise typer.Exit(1)
 
     def open_browser():
         webbrowser.open(f"http://{host}:{port}")
 
-    # Delay browser opening by 1 second to let server start
+    # Open browser after a short delay (port was verified available)
     threading.Timer(1.0, open_browser).start()
 
     # Run the web server

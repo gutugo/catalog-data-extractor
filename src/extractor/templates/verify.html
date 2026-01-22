@@ -905,6 +905,7 @@
         let selectedProductId = null;
         let hasUnsavedChanges = false;
         let dashboardMode = {{ 'true' if dashboard_mode else 'false' }};
+        const csrfToken = {{ csrf_token | tojson }};
 
         // Warn before leaving with unsaved changes
         window.addEventListener('beforeunload', (e) => {
@@ -1076,6 +1077,7 @@
 
                 const response = await fetch('/api/upload', {
                     method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken },
                     body: formData
                 });
 
@@ -1101,7 +1103,8 @@
         async function startExtraction(name) {
             try {
                 const response = await fetch(`/api/extract/${encodeURIComponent(name)}`, {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken }
                 });
 
                 const result = await response.json();
@@ -1373,14 +1376,14 @@
                     // Add new product
                     response = await fetch('/api/product', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
                         body: JSON.stringify(data)
                     });
                 } else {
                     // Update existing product
                     response = await fetch(`/api/product/${id}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
                         body: JSON.stringify(data)
                     });
                 }
@@ -1405,7 +1408,8 @@
 
             try {
                 const response = await fetch(`/api/product/${id}`, {
-                    method: 'DELETE'
+                    method: 'DELETE',
+                    headers: { 'X-CSRF-Token': csrfToken }
                 });
 
                 const result = await response.json();
@@ -1427,7 +1431,8 @@
 
             try {
                 const response = await fetch('/api/save', {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken }
                 });
 
                 const result = await response.json();
@@ -1447,7 +1452,8 @@
 
             try {
                 const response = await fetch('/api/export-csv', {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken }
                 });
 
                 const result = await response.json();
@@ -1477,7 +1483,7 @@
 
             // Shutdown the server
             try {
-                await fetch('/api/shutdown', { method: 'POST' });
+                await fetch('/api/shutdown', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken } });
             } catch (err) {
                 // Server might close before responding, that's OK
             }
@@ -1509,8 +1515,9 @@
 
         // Utilities
         function escapeHtml(text) {
+            if (text == null) return '';
             const div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = String(text);
             return div.innerHTML;
         }
 
@@ -1628,7 +1635,7 @@
                 try {
                     const response = await fetch(`/api/product/${product.id}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
                         body: JSON.stringify(data)
                     });
 

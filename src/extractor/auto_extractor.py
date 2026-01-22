@@ -768,11 +768,10 @@ class AutoExtractor:
                         page_number=page_num,
                         confidence=CONFIDENCE_PDFMINER
                     )
-                elif product.field_locations[field_name].confidence > CONFIDENCE_PDFMINER:
-                    # Keep existing higher confidence
-                    pass
-                else:
+                elif product.field_locations[field_name].confidence < CONFIDENCE_PDFMINER:
+                    # Update if existing confidence is lower
                     product.field_locations[field_name].confidence = CONFIDENCE_PDFMINER
+                # else: keep existing higher confidence
 
         return products
 

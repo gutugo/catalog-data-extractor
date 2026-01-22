@@ -83,7 +83,11 @@ class InteractiveExtractor:
             part = part.strip()
             if "-" in part:
                 try:
-                    start, end = part.split("-")
+                    parts = part.split("-")
+                    if len(parts) != 2:
+                        console.print(f"[red]Invalid range format: {part} (use start-end)[/red]")
+                        continue
+                    start, end = parts
                     for i in range(int(start), int(end) + 1):
                         if 1 <= i <= len(page.lines):
                             selected_lines.append(page.lines[i - 1])
