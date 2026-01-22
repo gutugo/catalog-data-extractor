@@ -2,6 +2,7 @@
 
 import atexit
 import io
+import os
 import sys
 import traceback
 import threading
@@ -48,8 +49,8 @@ def cleanup_pdf():
         if _state['pdf_doc']:
             try:
                 _state['pdf_doc'].close()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                print(f"Warning: Error closing PDF during cleanup: {e}", file=sys.stderr)
             _state['pdf_doc'] = None
 
 
@@ -83,10 +84,8 @@ def list_catalogs() -> list[dict]:
     # Find all sessions
     sessions = {}
     for session_file in SESSIONS_DIR.glob("*.session.json"):
-        # stem gives "foo.session", remove the ".session" suffix
-        name = session_file.stem
-        if name.endswith('.session'):
-            name = name[:-8]  # Remove '.session' (8 chars)
+        # stem gives "foo.session", use removesuffix for cleaner handling
+        name = session_file.stem.removesuffix('.session')
         sessions[name] = session_file
 
     # Find all exports
@@ -186,8 +185,8 @@ def index():
                             _state['pdf_path'] = pdf_path
                             _state['session'] = session
                             _state['dashboard_mode'] = False
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"Warning: Failed to open PDF {pdf_path}: {e}", file=sys.stderr)
 
     session = _state['session']
 
@@ -397,8 +396,8 @@ def switch_catalog(catalog_name: str):
         if old_pdf_doc:
             try:
                 old_pdf_doc.close()
-            except Exception:
-                pass  # Ignore close errors
+            except Exception as e:
+                print(f"Warning: Error closing old PDF: {e}", file=sys.stderr)
 
         # Update state
         _state['pdf_path'] = pdf_path
@@ -673,9 +672,8 @@ def shutdown():
         func()
     else:
         # For newer versions of werkzeug, use os._exit
-        import os
+        import time
         def shutdown_server():
-            import time
             time.sleep(0.5)
             os._exit(0)
         threading.Thread(target=shutdown_server).start()

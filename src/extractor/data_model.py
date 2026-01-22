@@ -1,15 +1,16 @@
 """Data models for catalog product extraction."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 import json
+import sys
 import uuid
 from pathlib import Path
 
 
 def _generate_id() -> str:
     """Generate a unique product ID."""
-    return str(uuid.uuid4())[:8]
+    return str(uuid.uuid4())[:16]
 
 
 @dataclass
@@ -171,7 +172,6 @@ class ExtractionSession:
             return cls.from_dict(data)
         except (json.JSONDecodeError, KeyError) as e:
             # Log error but return None to allow graceful handling
-            import sys
             print(f"Warning: Failed to load session {session_path}: {e}", file=sys.stderr)
             return None
 

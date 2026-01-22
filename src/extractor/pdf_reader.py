@@ -7,7 +7,7 @@ from typing import Iterator, Optional
 
 import pdfplumber
 from pdfminer.high_level import extract_pages
-from pdfminer.layout import LAParams, LTTextBoxHorizontal, LTTextLineHorizontal, LTChar
+from pdfminer.layout import LAParams, LTTextBoxHorizontal, LTTextLineHorizontal
 
 from .data_model import PageContent
 
