@@ -3,7 +3,9 @@
 from dataclasses import dataclass, field
 from typing import Optional
 import json
+import os
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -150,12 +152,30 @@ class ExtractionSession:
         )
 
     def save(self, session_dir: Path) -> Path:
-        """Save session to JSON file."""
+        """Save session to JSON file atomically.
+
+        Writes to a temporary file first, then atomically renames to prevent
+        data corruption if the process crashes during write.
+        """
         session_dir.mkdir(parents=True, exist_ok=True)
         filename = Path(self.source_file).stem + ".session.json"
         session_path = session_dir / filename
-        with open(session_path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+
+        # Write to temp file in same directory, then atomic rename
+        fd, temp_path = tempfile.mkstemp(dir=session_dir, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(self.to_dict(), f, indent=2)
+            # Atomic rename (on POSIX systems)
+            os.replace(temp_path, session_path)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+
         return session_path
 
     @classmethod

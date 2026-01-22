@@ -165,32 +165,44 @@ def index():
     # Check for catalog query param to auto-load
     catalog_name = request.args.get('catalog')
     if catalog_name:
-        # Try to load this catalog
-        session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
-        if session_path.exists():
-            session = ExtractionSession.load(session_path)
-            if session:
-                # Find PDF
-                pdf_path = CATALOGS_DIR / session.source_file
-                if not pdf_path.exists():
-                    pdf_path = Path.cwd() / session.source_file
+        # Validate catalog_name to prevent path traversal
+        if '/' in catalog_name or '\\' in catalog_name or '..' in catalog_name:
+            catalog_name = None
+        else:
+            # Load session and switch catalog within lock to prevent race conditions
+            with _state_lock:
+                session_path = SESSIONS_DIR / f"{catalog_name}.session.json"
+                if session_path.exists():
+                    session = ExtractionSession.load(session_path)
+                    if session:
+                        # Find PDF
+                        pdf_path = CATALOGS_DIR / session.source_file
+                        if not pdf_path.exists():
+                            pdf_path = Path.cwd() / session.source_file
 
-                if pdf_path.exists():
-                    with _state_lock:
-                        old_doc = _state['pdf_doc']
-                        try:
-                            _state['pdf_doc'] = fitz.open(pdf_path)
-                            if old_doc:
-                                old_doc.close()
-                            _state['pdf_path'] = pdf_path
-                            _state['session'] = session
-                            _state['dashboard_mode'] = False
-                        except Exception as e:
-                            print(f"Warning: Failed to open PDF {pdf_path}: {e}", file=sys.stderr)
+                        if pdf_path.exists():
+                            old_doc = _state['pdf_doc']
+                            try:
+                                new_doc = fitz.open(pdf_path)
+                                # Only update state after successful open
+                                _state['pdf_doc'] = new_doc
+                                _state['pdf_path'] = pdf_path
+                                _state['session'] = session
+                                _state['dashboard_mode'] = False
+                                # Close old doc after state update
+                                if old_doc:
+                                    try:
+                                        old_doc.close()
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                print(f"Warning: Failed to open PDF {pdf_path}: {e}", file=sys.stderr)
 
-    session = _state['session']
+    with _state_lock:
+        session = _state['session']
+        dashboard_mode = _state['dashboard_mode']
 
-    if _state['dashboard_mode'] or session is None:
+    if dashboard_mode or session is None:
         # Dashboard mode - no catalog loaded
         return render_template(
             'verify.html',
@@ -256,14 +268,17 @@ def upload_catalog():
     pdf_path = CATALOGS_DIR / filename
     file.save(pdf_path)
 
-    # Get page count
+    # Validate PDF and get page count
+    doc = None
     try:
         doc = fitz.open(pdf_path)
         page_count = len(doc)
-        doc.close()
     except Exception as e:
         pdf_path.unlink()  # Remove invalid PDF
         return jsonify({'error': f'Invalid PDF file: {e}'}), 400
+    finally:
+        if doc:
+            doc.close()
 
     return jsonify({
         'success': True,
@@ -474,18 +489,22 @@ def get_page_image(page_num: int):
 
         # Render page to image (0-indexed in PyMuPDF)
         # Note: We hold the lock during rendering to prevent pdf_doc from being closed
-        page = pdf_doc[page_num - 1]
-
-        # Get zoom level from query params (default 2x for good quality)
         try:
-            zoom = float(request.args.get('zoom', 1.0))
-            zoom = max(1.0, min(zoom, 5.0))  # Clamp between 1x and 5x
-        except (ValueError, TypeError):
-            zoom = 1.0
-        mat = fitz.Matrix(zoom, zoom)
+            page = pdf_doc[page_num - 1]
 
-        pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes('png')
+            # Get zoom level from query params (default 2x for good quality)
+            try:
+                zoom = float(request.args.get('zoom', 1.0))
+                zoom = max(1.0, min(zoom, 5.0))  # Clamp between 1x and 5x
+            except (ValueError, TypeError):
+                zoom = 1.0
+            mat = fitz.Matrix(zoom, zoom)
+
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes('png')
+        except Exception as e:
+            print(f"Error rendering page {page_num}: {e}", file=sys.stderr)
+            return jsonify({'error': f'Failed to render page: {e}'}), 500
 
     return send_file(
         io.BytesIO(img_bytes),

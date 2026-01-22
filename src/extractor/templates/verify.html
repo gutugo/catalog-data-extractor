@@ -967,26 +967,26 @@
                 // Check if this is the active catalog (compare without extension)
                 const currentBase = currentCatalog ? currentCatalog.replace(/\.pdf$/i, '') : null;
                 const isActive = currentBase === c.name;
-                // Escape name for use in onclick attribute
-                const safeName = c.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
                 // Different display based on status
                 let statusBadge = '';
-                let clickAction = `switchCatalog('${safeName}')`;
+                let action = 'switch';
                 let meta = `${c.products_count} products`;
 
                 if (c.status === 'uploaded') {
                     statusBadge = '<span class="catalog-status status-uploaded">Not extracted</span>';
-                    clickAction = `startExtraction('${safeName}')`;
+                    action = 'extract';
                     meta = 'Click to extract';
                 } else if (c.status === 'extracting') {
                     statusBadge = '<span class="catalog-status status-extracting">Extracting...</span>';
-                    clickAction = '';
+                    action = '';
                     meta = 'Please wait...';
                 }
 
+                // Use data attributes instead of inline onclick to prevent XSS
+                const dataAttrs = action ? `data-catalog="${escapeHtml(c.name)}" data-action="${action}"` : '';
                 return `
-                    <div class="catalog-item ${isActive ? 'active' : ''}" ${clickAction ? `onclick="${clickAction}"` : ''}>
+                    <div class="catalog-item ${isActive ? 'active' : ''}" ${dataAttrs}>
                         <div class="catalog-item-name">${escapeHtml(c.name)}</div>
                         <div class="catalog-item-meta">
                             <span>${meta}</span>
@@ -995,6 +995,19 @@
                     </div>
                 `;
             }).join('');
+
+            // Use event delegation for catalog clicks (XSS-safe)
+            container.querySelectorAll('.catalog-item[data-catalog]').forEach(item => {
+                item.addEventListener('click', function() {
+                    const name = this.dataset.catalog;
+                    const action = this.dataset.action;
+                    if (action === 'switch') {
+                        switchCatalog(name);
+                    } else if (action === 'extract') {
+                        startExtraction(name);
+                    }
+                });
+            });
         }
 
         async function switchCatalog(name) {
