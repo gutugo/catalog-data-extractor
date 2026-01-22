@@ -87,7 +87,8 @@ Session files are stored as JSON in `processed/sessions/`. The `from_dict()` met
 ### data_model.py
 - Atomic session saves with temp file + rename
 - Windows compatibility: fallback to unlink+rename if `os.replace()` fails
-- Product IDs preserved on reload (only generates new ID if truly `None`)
+- Product IDs preserved on reload (generates new ID if `None` or empty string)
+- Cleanup failures during atomic save are logged to stderr
 
 ### FieldLocation
 Each extracted field can have an associated `FieldLocation` storing its source position on the PDF:
@@ -119,9 +120,10 @@ CSV output columns:
 - `extract_text_with_layout()` - Text block extraction using pdfminer.six
   - Returns text blocks with bounding boxes and individual lines
   - Uses LAParams for layout analysis
-- `ExtractionWarning` - Class for tracking extraction failures programmatically
+- `ExtractionWarning` - Thread-safe class for tracking extraction failures programmatically
+  - Uses `threading.Lock()` for concurrent access safety
   - `add(message)` - Record a warning
-  - `get_all()` - Get all warnings
+  - `get_all()` - Get all warnings (returns copy)
   - `clear()` - Clear warnings
 
 ### auto_extractor.py
@@ -152,7 +154,7 @@ When enabled, uses multiple extraction methods and merges results:
 ### web_verifier.py
 - Flask app with API endpoints for page images, products CRUD
 - `/api/page/<n>` - Get page data and products
-- `/api/page/<n>/image` - Renders PDF page as PNG via PyMuPDF (zoom param: 0.5-5x)
+- `/api/page/<n>/image` - Renders PDF page as PNG via PyMuPDF (zoom param: 1x-5x)
 - `/api/product` - POST to add, PUT/DELETE with id to update/remove
 - `/api/stats` - Get total product count and session info
 - `/api/save` - Save session to disk
@@ -161,7 +163,17 @@ When enabled, uses multiple extraction methods and merges results:
 - PDF document auto-cleanup on exit via atexit
 
 #### Security & Resource Management
-- `_validate_catalog_name()` - Prevents path traversal using `secure_filename`
+- **CSRF Protection**: All state-changing endpoints (POST/PUT/DELETE) require `X-CSRF-Token` header
+  - Token generated at server start via `_generate_csrf_token()` using `secrets.token_urlsafe(32)`
+  - Token passed to template and included in all fetch requests from JavaScript
+  - `_check_csrf()` helper validates token on each protected endpoint
+- **Input Sanitization**: `_sanitize_product_field()` truncates input to prevent resource exhaustion
+  - `MAX_PRODUCT_NAME_LENGTH = 1000` characters
+  - `MAX_FIELD_LENGTH = 10000` characters (description)
+  - Item numbers, pkg, uom limited to 50-100 characters
+- **Path Traversal Prevention**:
+  - `_validate_catalog_name()` - Uses `secure_filename` for catalog names
+  - `_validate_source_file_path()` in cli.py - Validates PDF paths stay within allowed directories
 - `_cleanup_completed_jobs()` - Removes finished extraction jobs after 5 minutes
 - Explicit pixmap memory cleanup after page rendering
 - Thread-safe state access with `_state_lock` and `_extraction_lock`
