@@ -56,6 +56,9 @@ uv run extractor resume <catalog-name>
 
 # Export to CSV
 uv run extractor export <catalog-name>
+
+# Delete a catalog (no UI - manual removal)
+rm catalogs/<name>.pdf processed/sessions/<name>.session.json processed/extractions/<name>.csv
 ```
 
 ## Extraction Workflow
