@@ -576,6 +576,7 @@ def get_page(page_num: int):
                 'item_no': p.item_no,
                 'pkg': p.pkg,
                 'uom': p.uom,
+                'confidence': p.get_confidence_score(),
             }
             # Include field_locations if present
             if p.field_locations:
@@ -703,7 +704,7 @@ def update_product(product_id: str):
         if 'description' in data:
             product.description = _sanitize_product_field(data['description'])
         if 'item_no' in data:
-            product.item_no = _sanitize_product_field(data['item_no'], 100)
+            product.item_no = _sanitize_product_field(data['item_no'], 200)
         if 'pkg' in data:
             product.pkg = _sanitize_product_field(data['pkg'], 50)
         if 'uom' in data:
@@ -743,7 +744,7 @@ def add_product():
         product = Product(
             product_name=_sanitize_product_field(data.get('product_name', ''), MAX_PRODUCT_NAME_LENGTH),
             description=_sanitize_product_field(data.get('description', '')),
-            item_no=_sanitize_product_field(data.get('item_no', ''), 100),
+            item_no=_sanitize_product_field(data.get('item_no', ''), 200),
             pkg=_sanitize_product_field(data.get('pkg', ''), 50),
             uom=_sanitize_product_field(data.get('uom', ''), 50),
             page_number=page_number,
@@ -837,7 +838,10 @@ def export_csv():
 
 @app.route('/api/stats')
 def get_stats():
-    """Get session statistics including total product count."""
+    """Get session statistics including total product count and confidence data."""
+    # Confidence threshold for "low confidence" items (95%)
+    LOW_CONFIDENCE_THRESHOLD = 95.0
+
     with _state_lock:
         session = _state['session']
 
@@ -847,13 +851,37 @@ def get_stats():
                 'total_pages': 0,
                 'source_file': None,
                 'dashboard_mode': True,
+                'overall_confidence': 0,
+                'low_confidence_count': 0,
+                'low_confidence_products': [],
             })
+
+        # Calculate confidence statistics
+        total_confidence = 0.0
+        low_confidence_products = []
+
+        for p in session.products:
+            score = p.get_confidence_score()
+            total_confidence += score
+            if score < LOW_CONFIDENCE_THRESHOLD:
+                low_confidence_products.append({
+                    'id': p.id,
+                    'page': p.page_number,
+                    'score': round(score, 1),
+                    'item_no': p.item_no,
+                    'product_name': p.product_name[:50] if p.product_name else '',
+                })
+
+        overall_confidence = (total_confidence / len(session.products)) if session.products else 100.0
 
         return jsonify({
             'total_products': len(session.products),
             'total_pages': session.total_pages,
             'source_file': session.source_file,
             'dashboard_mode': False,
+            'overall_confidence': round(overall_confidence, 1),
+            'low_confidence_count': len(low_confidence_products),
+            'low_confidence_products': low_confidence_products,
         })
 
 

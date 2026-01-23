@@ -8,15 +8,24 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .data_model import Product, ExtractionSession, PageContent, FieldLocation
-from .pdf_reader import PDFReader, CAMELOT_AVAILABLE
+from .pdf_reader import (
+    PDFReader,
+    CAMELOT_AVAILABLE,
+    DOCLING_AVAILABLE,
+    IMG2TABLE_AVAILABLE,
+    PYMUPDF4LLM_AVAILABLE,
+)
 
 console = Console()
 
 # Confidence scores for different extraction methods
-CONFIDENCE_CAMELOT = 1.0
-CONFIDENCE_PDFPLUMBER = 0.95
-CONFIDENCE_PDFMINER = 0.8
-CONFIDENCE_REGEX = 0.5
+CONFIDENCE_DOCLING = 0.98       # High - AI table detection (IBM TableFormer)
+CONFIDENCE_CAMELOT = 1.0        # Highest - traditional table detection
+CONFIDENCE_PDFPLUMBER = 0.95    # Good - pdfplumber table extraction
+CONFIDENCE_IMG2TABLE = 0.90     # Good - borderless table specialist
+CONFIDENCE_PYMUPDF4LLM = 0.85   # Good - layout-aware markdown text
+CONFIDENCE_PDFMINER = 0.8       # Fair - layout analysis
+CONFIDENCE_REGEX = 0.5          # Low - text pattern fallback
 
 # Patterns for identifying valid item numbers
 # Matches:
@@ -58,6 +67,14 @@ PRODUCT_LINE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Pattern for dual-identifier format: UPC SKU DESCRIPTION SIZE $PRICE
+# Example: "A1 446761 ACNE CONTROL CLEANSER 8 OZ $16"
+# UPC is short alphanumeric (A1, A11, B2, etc.), SKU is 5-6 digits
+DUAL_ID_PATTERN = re.compile(
+    rf'^([A-Z]\d{{1,3}})\s+(\d{{5,6}})\s+(.+?)\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
+    re.IGNORECASE
+)
+
 # Pattern for item_no, count, price on one line (multi-line product name above)
 MULTILINE_ITEM_PATTERN = re.compile(
     rf'^(\d{{4,5}})\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
@@ -85,12 +102,62 @@ SLASH_UOM_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Header patterns to skip
+# Header patterns to skip (used for detecting header rows)
 HEADER_PATTERNS = [
     re.compile(r'^Item\s*#?$', re.IGNORECASE),
     re.compile(r'^Description$', re.IGNORECASE),
     re.compile(r'^Count$', re.IGNORECASE),
     re.compile(r'^Price$', re.IGNORECASE),
+    re.compile(r'^SKU\s*#?$', re.IGNORECASE),
+    re.compile(r'^UPC', re.IGNORECASE),
+    re.compile(r'^Product\s*(Name|Code)?$', re.IGNORECASE),
+]
+
+# Identifier column header patterns - maps header text to field name
+# Order matters: more specific patterns should come first
+IDENTIFIER_HEADER_PATTERNS = {
+    'upc': [
+        re.compile(r'^UPC\s*(Code|#)?$', re.IGNORECASE),
+        re.compile(r'^Universal\s*Product\s*Code$', re.IGNORECASE),
+        re.compile(r'^Barcode$', re.IGNORECASE),
+        re.compile(r'^GTIN$', re.IGNORECASE),
+        re.compile(r'^EAN(-13)?$', re.IGNORECASE),
+    ],
+    'sku': [
+        re.compile(r'^SKU\s*(#|No\.?)?$', re.IGNORECASE),
+        re.compile(r'^Stock\s*(Keeping\s*Unit|#|No\.?)?$', re.IGNORECASE),
+        re.compile(r'^Vendor\s*(#|No\.?)?$', re.IGNORECASE),
+    ],
+    'item_no': [
+        re.compile(r'^Item\s*(#|No\.?|Number)?$', re.IGNORECASE),
+        re.compile(r'^Part\s*(#|No\.?|Number)?$', re.IGNORECASE),
+        re.compile(r'^Catalog\s*(#|No\.?|Number)?$', re.IGNORECASE),
+        re.compile(r'^Cat\s*(#|No\.?)?$', re.IGNORECASE),
+        re.compile(r'^Product\s*(#|Code|ID)$', re.IGNORECASE),
+        re.compile(r'^Model\s*(#|No\.?|Number)?$', re.IGNORECASE),
+        re.compile(r'^Code$', re.IGNORECASE),
+        re.compile(r'^ID$', re.IGNORECASE),
+        re.compile(r'^NDC$', re.IGNORECASE),  # National Drug Code
+        re.compile(r'^MPN$', re.IGNORECASE),  # Manufacturer Part Number
+    ],
+}
+
+# Product name/description header patterns
+PRODUCT_NAME_HEADER_PATTERNS = [
+    re.compile(r'^Description$', re.IGNORECASE),
+    re.compile(r'^Product\s*(Name)?$', re.IGNORECASE),
+    re.compile(r'^Item\s*(Name|Description)$', re.IGNORECASE),
+    re.compile(r'^Name$', re.IGNORECASE),
+]
+
+# Count/quantity header patterns
+COUNT_HEADER_PATTERNS = [
+    re.compile(r'^Count$', re.IGNORECASE),
+    re.compile(r'^Qty\.?$', re.IGNORECASE),
+    re.compile(r'^Quantity$', re.IGNORECASE),
+    re.compile(r'^Pack\s*(Size)?$', re.IGNORECASE),
+    re.compile(r'^Size$', re.IGNORECASE),
+    re.compile(r'^Unit$', re.IGNORECASE),
 ]
 
 # Skip patterns for footer/note rows
@@ -186,6 +253,64 @@ def should_skip_row(row: list[str]) -> bool:
     return False
 
 
+def detect_column_mapping(table: list[list]) -> dict[str, int]:
+    """Detect column types based on header row patterns.
+
+    Returns a dict mapping field names to column indices:
+    - 'item_no': generic item number column
+    - 'sku': SKU column
+    - 'upc': UPC/barcode column
+    - 'product_name': product description column
+    - 'count': count/quantity column
+
+    Falls back to position-based detection if no headers found.
+    """
+    if not table:
+        return {}
+
+    mapping = {}
+
+    # Check first few rows for headers
+    for row_idx, row in enumerate(table[:3]):
+        row_strings = [_get_cell_text(cell) if not isinstance(cell, str) else cell for cell in row]
+
+        for col_idx, cell_text in enumerate(row_strings):
+            if not cell_text:
+                continue
+            cell_text = cell_text.strip()
+
+            # Check for identifier columns (upc, sku, item_no)
+            for field_name, patterns in IDENTIFIER_HEADER_PATTERNS.items():
+                for pattern in patterns:
+                    if pattern.match(cell_text):
+                        if field_name not in mapping:
+                            mapping[field_name] = col_idx
+                        break
+
+            # Check for product name column
+            for pattern in PRODUCT_NAME_HEADER_PATTERNS:
+                if pattern.match(cell_text):
+                    if 'product_name' not in mapping:
+                        mapping['product_name'] = col_idx
+                    break
+
+            # Check for count column
+            for pattern in COUNT_HEADER_PATTERNS:
+                if pattern.match(cell_text):
+                    if 'count' not in mapping:
+                        mapping['count'] = col_idx
+                    break
+
+    return mapping
+
+
+def _get_cell_text(cell) -> str:
+    """Get text from a cell, handling both string and dict formats."""
+    if isinstance(cell, dict):
+        return (cell.get('text') or '').strip()
+    return (cell or '').strip()
+
+
 def clean_product_name(name: str) -> str:
     """Clean up product name text."""
     if not name:
@@ -195,11 +320,29 @@ def clean_product_name(name: str) -> str:
     return cleaned
 
 
-def _get_cell_text(cell) -> str:
-    """Get text from a cell, handling both string and dict formats."""
-    if isinstance(cell, dict):
-        return (cell.get('text') or '').strip()
-    return (cell or '').strip()
+def combine_identifiers(upc: str, sku: str, item_no: str) -> str:
+    """Combine identifiers with ' / ' separator. Priority: UPC > SKU > Item #.
+
+    Args:
+        upc: UPC/barcode value
+        sku: SKU value
+        item_no: Item number value
+
+    Returns:
+        Combined identifier string like "012345678901 / ABC123"
+    """
+    parts = []
+    if upc:
+        parts.append(upc.strip())
+    if sku:
+        sku_val = sku.strip()
+        if sku_val not in parts:
+            parts.append(sku_val)
+    if item_no:
+        item_val = item_no.strip()
+        if item_val not in parts:
+            parts.append(item_val)
+    return ' / '.join(parts) if parts else ''
 
 
 def find_count_column(table: list[list]) -> int:
@@ -255,19 +398,43 @@ def _get_cell_bbox(cell) -> tuple | None:
 def extract_products_from_table(table: list[list], page_number: int, source_file: str) -> list[Product]:
     """Extract products from a single table.
 
-    Expected column format: Item # | Description | Count | Price
-    But we handle variations and different column counts.
+    Supports multiple column formats:
+    - Item # | Description | Count | Price
+    - UPC | SKU | Description | Size | Price
+    - And other variations
 
+    Uses header detection to map columns, falls back to position-based detection.
     Works with both string lists and dict lists (with 'text' and 'bbox' keys).
     """
     products = []
 
-    # Determine which column contains count data
-    count_col = find_count_column(table)
+    # Detect column mapping from headers
+    col_mapping = detect_column_mapping(table)
+
+    # Determine which column contains count data (fallback detection)
+    count_col = col_mapping.get('count', -1)
+    if count_col < 0:
+        count_col = find_count_column(table)
 
     # Convert row to string list for header/skip checks
     def row_to_strings(row):
         return [_get_cell_text(cell) for cell in row]
+
+    # Determine identifier columns - use mapping or fallback to position
+    # Priority: first valid identifier column found
+    id_cols = {}
+    if 'upc' in col_mapping:
+        id_cols['upc'] = col_mapping['upc']
+    if 'sku' in col_mapping:
+        id_cols['sku'] = col_mapping['sku']
+    if 'item_no' in col_mapping:
+        id_cols['item_no'] = col_mapping['item_no']
+
+    # Product name column
+    name_col = col_mapping.get('product_name', -1)
+
+    # If no column mapping found, use position-based fallback
+    use_positional = len(id_cols) == 0
 
     for row in table:
         row_strings = row_to_strings(row)
@@ -276,17 +443,105 @@ def extract_products_from_table(table: list[list], page_number: int, source_file
         if is_header_row(row_strings) or should_skip_row(row_strings):
             continue
 
-        # Need at least 2 columns for item_no and description
+        # Need at least 2 columns
         if len(row) < 2:
             continue
 
-        # Try to find item number in first column
-        item_no = _get_cell_text(row[0])
-        if not is_valid_item_no(item_no):
-            continue
+        # Extract identifiers based on mapping
+        item_no = ''
+        sku = ''
+        upc = ''
+        field_locations = {}
 
-        # Extract product name (column 2)
-        product_name = clean_product_name(_get_cell_text(row[1]) if len(row) > 1 else '')
+        if use_positional:
+            # Fallback: first column is identifier, second is product name
+            item_no = _get_cell_text(row[0])
+            if not is_valid_item_no(item_no):
+                continue
+            name_col = 1
+
+            # Set field location for item_no
+            item_bbox = _get_cell_bbox(row[0])
+            if item_bbox:
+                field_locations['item_no'] = FieldLocation(
+                    x0=item_bbox[0], y0=item_bbox[1],
+                    x1=item_bbox[2], y1=item_bbox[3],
+                    page_number=page_number,
+                    confidence=1.0
+                )
+        else:
+            # Use column mapping
+            has_valid_id = False
+
+            if 'upc' in id_cols and id_cols['upc'] < len(row):
+                upc = _get_cell_text(row[id_cols['upc']])
+                if upc:
+                    has_valid_id = True
+                    upc_bbox = _get_cell_bbox(row[id_cols['upc']])
+                    if upc_bbox:
+                        field_locations['upc'] = FieldLocation(
+                            x0=upc_bbox[0], y0=upc_bbox[1],
+                            x1=upc_bbox[2], y1=upc_bbox[3],
+                            page_number=page_number,
+                            confidence=1.0
+                        )
+
+            if 'sku' in id_cols and id_cols['sku'] < len(row):
+                sku = _get_cell_text(row[id_cols['sku']])
+                if sku:
+                    has_valid_id = True
+                    sku_bbox = _get_cell_bbox(row[id_cols['sku']])
+                    if sku_bbox:
+                        field_locations['sku'] = FieldLocation(
+                            x0=sku_bbox[0], y0=sku_bbox[1],
+                            x1=sku_bbox[2], y1=sku_bbox[3],
+                            page_number=page_number,
+                            confidence=1.0
+                        )
+
+            if 'item_no' in id_cols and id_cols['item_no'] < len(row):
+                item_no = _get_cell_text(row[id_cols['item_no']])
+                if item_no and is_valid_item_no(item_no):
+                    has_valid_id = True
+                    item_bbox = _get_cell_bbox(row[id_cols['item_no']])
+                    if item_bbox:
+                        field_locations['item_no'] = FieldLocation(
+                            x0=item_bbox[0], y0=item_bbox[1],
+                            x1=item_bbox[2], y1=item_bbox[3],
+                            page_number=page_number,
+                            confidence=1.0
+                        )
+
+            if not has_valid_id:
+                continue
+
+            # If no explicit product_name column, find the first text-like column
+            # that isn't an identifier or count column
+            if name_col < 0:
+                used_cols = set(id_cols.values())
+                if count_col >= 0:
+                    used_cols.add(count_col)
+                for idx in range(len(row)):
+                    if idx not in used_cols:
+                        cell_text = _get_cell_text(row[idx])
+                        # Skip if looks like a price
+                        if cell_text and not cell_text.startswith('$'):
+                            name_col = idx
+                            break
+
+        # Extract product name
+        product_name = ''
+        if name_col >= 0 and name_col < len(row):
+            product_name = clean_product_name(_get_cell_text(row[name_col]))
+            name_bbox = _get_cell_bbox(row[name_col])
+            if name_bbox:
+                field_locations['product_name'] = FieldLocation(
+                    x0=name_bbox[0], y0=name_bbox[1],
+                    x1=name_bbox[2], y1=name_bbox[3],
+                    page_number=page_number,
+                    confidence=1.0
+                )
+
         if not product_name:
             continue
 
@@ -299,30 +554,7 @@ def extract_products_from_table(table: list[list], page_number: int, source_file
 
         pkg, uom = parse_count_uom(count_str)
 
-        # Build field locations from bboxes
-        field_locations = {}
-
-        # Item number location (column 0)
-        item_bbox = _get_cell_bbox(row[0])
-        if item_bbox:
-            field_locations['item_no'] = FieldLocation(
-                x0=item_bbox[0], y0=item_bbox[1],
-                x1=item_bbox[2], y1=item_bbox[3],
-                page_number=page_number,
-                confidence=1.0
-            )
-
-        # Product name location (column 1)
-        name_bbox = _get_cell_bbox(row[1]) if len(row) > 1 else None
-        if name_bbox:
-            field_locations['product_name'] = FieldLocation(
-                x0=name_bbox[0], y0=name_bbox[1],
-                x1=name_bbox[2], y1=name_bbox[3],
-                page_number=page_number,
-                confidence=1.0
-            )
-
-        # Count/description location (same cell for pkg, uom, description)
+        # Add count field locations
         if count_bbox:
             count_location = FieldLocation(
                 x0=count_bbox[0], y0=count_bbox[1],
@@ -330,17 +562,19 @@ def extract_products_from_table(table: list[list], page_number: int, source_file
                 page_number=page_number,
                 confidence=1.0
             )
-            field_locations['description'] = count_location
             if pkg:
                 field_locations['pkg'] = count_location
             if uom:
                 field_locations['uom'] = count_location
 
-        # Create product
+        # Combine identifiers into single item_no field
+        combined_item_no = combine_identifiers(upc, sku, item_no)
+
+        # Create product with combined identifier
         products.append(Product(
             product_name=product_name,
-            description=count_str,  # Keep original count string as description
-            item_no=item_no,
+            description='',
+            item_no=combined_item_no,
             pkg=pkg,
             uom=uom,
             page_number=page_number,
@@ -375,6 +609,36 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
             i += 1
             continue
 
+        # Try dual-identifier pattern first (e.g., "A1 446761 DESCRIPTION SIZE $PRICE")
+        dual_match = DUAL_ID_PATTERN.match(line)
+        if dual_match:
+            upc_code = dual_match.group(1)  # e.g., "A1"
+            sku_code = dual_match.group(2)  # e.g., "446761"
+            product_name = dual_match.group(3).strip()
+            count_str = dual_match.group(4).strip()
+
+            # Combine UPC and SKU into item_no
+            combined_item_no = combine_identifiers(upc_code, sku_code, '')
+
+            # Prepend any pending description
+            if pending_description:
+                product_name = ' '.join(pending_description) + ' ' + product_name
+                pending_description = []
+
+            pkg, uom = parse_count_uom(count_str)
+
+            products.append(Product(
+                product_name=product_name,
+                description='',
+                item_no=combined_item_no,
+                pkg=pkg,
+                uom=uom,
+                page_number=page.page_number,
+                source_file=source_file,
+            ))
+            i += 1
+            continue
+
         # Try single-line product pattern (OTC-style)
         match = PRODUCT_LINE_PATTERN.match(line)
         if match:
@@ -391,7 +655,7 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
 
             products.append(Product(
                 product_name=product_name,
-                description=count_str,
+                description='',
                 item_no=item_no,
                 pkg=pkg,
                 uom=uom,
@@ -415,7 +679,7 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
             if item_no:
                 products.append(Product(
                     product_name=product_name,
-                    description=count_str,
+                    description='',
                     item_no=item_no,
                     pkg=pkg,
                     uom=uom,
@@ -438,7 +702,7 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
 
             products.append(Product(
                 product_name=product_name,
-                description=f'/{uom.upper()}',
+                description='',
                 item_no=item_no,
                 pkg='1',
                 uom=uom,
@@ -493,7 +757,7 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
             if item_no and is_valid_item_no(item_no):
                 products.append(Product(
                     product_name=product_name,
-                    description=f'/{uom.upper()}' if uom else '',
+                    description='',
                     item_no=item_no,
                     pkg='1' if uom else '',
                     uom=uom,
@@ -540,7 +804,7 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
             if item_no:
                 products.append(Product(
                     product_name=product_name,
-                    description=f'/{uom.upper()}' if uom else '',
+                    description='',
                     item_no=item_no,
                     pkg='1' if uom else '',
                     uom=uom,
@@ -571,10 +835,12 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
 class AutoExtractor:
     """Handles automatic extraction from catalogs using table-aware parsing."""
 
-    def __init__(self, pdf_path: Path, session_dir: Path, multi_method: bool = False):
+    def __init__(self, pdf_path: Path, session_dir: Path, multi_method: bool = False,
+                 docling_only: bool = False):
         self.pdf_path = Path(pdf_path)
         self.session_dir = session_dir
         self.multi_method = multi_method
+        self.docling_only = docling_only  # Use only Docling for extraction (testing)
         self.fallback_pages: list[int] = []  # Track pages that needed text fallback (single-method)
         self.empty_pages: list[int] = []  # Track pages with no products found (multi-method)
 
@@ -590,8 +856,19 @@ class AutoExtractor:
         if show_console:
             mode = "[cyan](multi-method)[/cyan] " if self.multi_method else ""
             console.print(f"[bold blue]Auto-extracting:[/bold blue] {mode}{self.pdf_path.name}")
-            if self.multi_method and not CAMELOT_AVAILABLE:
-                console.print("[yellow]Note: Camelot not available (install ghostscript). Using pdfplumber + pdfminer.[/yellow]")
+            if self.multi_method:
+                # Show availability of optional extractors
+                unavailable = []
+                if not CAMELOT_AVAILABLE:
+                    unavailable.append("Camelot")
+                if not DOCLING_AVAILABLE:
+                    unavailable.append("Docling")
+                if not IMG2TABLE_AVAILABLE:
+                    unavailable.append("img2table")
+                if not PYMUPDF4LLM_AVAILABLE:
+                    unavailable.append("pymupdf4llm")
+                if unavailable:
+                    console.print(f"[yellow]Note: {', '.join(unavailable)} not available[/yellow]")
 
         with PDFReader(self.pdf_path) as reader:
             session = ExtractionSession(
@@ -652,46 +929,75 @@ class AutoExtractor:
 
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract products from a single page, preferring table extraction."""
+        # Use Docling-only mode if enabled (for testing)
+        if self.docling_only:
+            return self._extract_page_docling_only(reader, page_num)
+
         # Use multi-method extraction if enabled
         if self.multi_method:
             return self._extract_page_multi(reader, page_num)
 
         # Try table extraction with positions first
         tables_with_positions = reader.extract_tables_with_positions(page_num)
+        table_products = []
 
         if tables_with_positions:
-            products = []
             for table_data in tables_with_positions:
                 # Convert to row format expected by extract_products_from_table
-                products.extend(extract_products_from_table(
+                table_products.extend(extract_products_from_table(
                     table_data['rows'], page_num, self.pdf_path.name
                 ))
 
-            if products:
-                return products
-
-        # Fallback to text extraction
-        self.fallback_pages.append(page_num)
+        # Also try text extraction
         page_content = reader.get_page(page_num)
-        return extract_products_from_text_fallback(page_content, self.pdf_path.name)
+        text_products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+
+        # Compare results: prefer extraction with combined identifiers (has " / ")
+        # This handles cases where pdfplumber misses columns like UPC
+        table_combined = sum(1 for p in table_products if ' / ' in p.item_no)
+        text_combined = sum(1 for p in text_products if ' / ' in p.item_no)
+
+        if text_combined > table_combined and text_products:
+            # Text extraction has more complete identifiers
+            self.fallback_pages.append(page_num)
+            return text_products
+        elif table_products:
+            return table_products
+        elif text_products:
+            self.fallback_pages.append(page_num)
+            return text_products
+
+        return []
 
     def _extract_page_multi(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract using multiple methods and merge best results."""
         all_products = []
 
-        # 1. Try Camelot first (best table accuracy)
+        # 1. Try Docling (IBM) - best AI-powered table detection
+        docling_products = self._try_docling(reader, page_num)
+        all_products.append(docling_products)
+
+        # 2. Try Camelot (traditional high-accuracy table extraction)
         camelot_products = self._try_camelot(reader, page_num)
         all_products.append(camelot_products)
 
-        # 2. Try pdfplumber tables (current method)
+        # 3. Try img2table (borderless table specialist)
+        img2table_products = self._try_img2table(reader, page_num)
+        all_products.append(img2table_products)
+
+        # 4. Try pdfplumber tables (current method)
         pdfplumber_products = self._try_pdfplumber_tables(reader, page_num)
         all_products.append(pdfplumber_products)
 
-        # 3. Try pdfminer.six text layout
+        # 5. Try pymupdf4llm text extraction (layout-aware markdown)
+        pymupdf4llm_products = self._try_pymupdf4llm(reader, page_num)
+        all_products.append(pymupdf4llm_products)
+
+        # 6. Try pdfminer.six text layout
         layout_products = self._try_pdfminer_layout(reader, page_num)
         all_products.append(layout_products)
 
-        # 4. Merge results - pick best confidence per product
+        # 7. Merge results - pick best confidence per product
         merged = self._merge_extractions(*all_products)
 
         # If no products found by any method, track as empty page
@@ -699,6 +1005,39 @@ class AutoExtractor:
             self.empty_pages.append(page_num)
 
         return merged
+
+    def _extract_page_docling_only(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Extract using only Docling (for testing)."""
+        if not DOCLING_AVAILABLE:
+            console.print("[red]Docling not available![/red]")
+            return []
+
+        products = self._try_docling(reader, page_num)
+
+        if not products:
+            self.empty_pages.append(page_num)
+
+        return products
+
+    def _try_docling(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using Docling (IBM) - AI-powered table detection."""
+        if not DOCLING_AVAILABLE:
+            return []
+
+        tables = reader.extract_tables_docling(page_num)
+        products = []
+
+        for table_data in tables:
+            extracted = extract_products_from_table(
+                table_data['rows'], page_num, self.pdf_path.name
+            )
+            # Update confidence to Docling level
+            for product in extracted:
+                for field_name, location in product.field_locations.items():
+                    location.confidence = CONFIDENCE_DOCLING
+            products.extend(extracted)
+
+        return products
 
     def _try_camelot(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Try extraction using Camelot."""
@@ -717,6 +1056,62 @@ class AutoExtractor:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_CAMELOT
             products.extend(extracted)
+
+        return products
+
+    def _try_img2table(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using img2table - borderless table specialist."""
+        if not IMG2TABLE_AVAILABLE:
+            return []
+
+        tables = reader.extract_tables_img2table(page_num)
+        products = []
+
+        for table_data in tables:
+            extracted = extract_products_from_table(
+                table_data['rows'], page_num, self.pdf_path.name
+            )
+            # Update confidence to img2table level
+            for product in extracted:
+                for field_name, location in product.field_locations.items():
+                    location.confidence = CONFIDENCE_IMG2TABLE
+            products.extend(extracted)
+
+        return products
+
+    def _try_pymupdf4llm(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using pymupdf4llm - layout-aware markdown text."""
+        if not PYMUPDF4LLM_AVAILABLE:
+            return []
+
+        markdown_text = reader.extract_text_pymupdf4llm(page_num)
+        if not markdown_text:
+            return []
+
+        # Convert markdown to lines for regex extraction
+        # pymupdf4llm preserves layout better, so split by newlines
+        lines = [line.strip() for line in markdown_text.split('\n') if line.strip()]
+
+        # Create a synthetic PageContent for the fallback extractor
+        page_content = PageContent(
+            page_number=page_num,
+            lines=lines,
+            raw_text=markdown_text
+        )
+
+        products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+
+        # Update confidence for pymupdf4llm extraction
+        for product in products:
+            for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
+                if field_name not in product.field_locations:
+                    product.field_locations[field_name] = FieldLocation(
+                        x0=0, y0=0, x1=0, y1=0,
+                        page_number=page_num,
+                        confidence=CONFIDENCE_PYMUPDF4LLM
+                    )
+                else:
+                    product.field_locations[field_name].confidence = CONFIDENCE_PYMUPDF4LLM
 
         return products
 

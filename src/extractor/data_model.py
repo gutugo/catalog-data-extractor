@@ -56,7 +56,7 @@ class Product:
 
     product_name: str
     description: str = ""
-    item_no: str = ""
+    item_no: str = ""  # Combined identifier (UPC / SKU / Item # with " / " separator)
     pkg: str = ""
     uom: str = ""
     page_number: int = 0
@@ -81,6 +81,16 @@ class Product:
                 k: v.to_dict() for k, v in self.field_locations.items()
             }
         return result
+
+    def get_confidence_score(self) -> float:
+        """Return average confidence across all field locations (0-100).
+
+        Returns 100.0 if no field_locations (manual entry or table extraction).
+        """
+        if not self.field_locations:
+            return 100.0  # No locations = manual entry or table extraction
+        confidences = [loc.confidence for loc in self.field_locations.values()]
+        return (sum(confidences) / len(confidences)) * 100
 
     @classmethod
     def from_dict(cls, data: dict) -> "Product":

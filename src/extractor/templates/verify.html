@@ -706,6 +706,113 @@
             background: #4b5563;
         }
 
+        /* Confidence badge styles */
+        .confidence-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .confidence-high {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        .confidence-medium {
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+        }
+
+        .confidence-low {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .confidence-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .confidence-dot.high { background: #10b981; }
+        .confidence-dot.medium { background: #f59e0b; }
+        .confidence-dot.low { background: #ef4444; }
+
+        /* Product card confidence border */
+        .product-card.low-confidence {
+            border-color: #f59e0b;
+            border-width: 2px;
+        }
+
+        .product-card.very-low-confidence {
+            border-color: #ef4444;
+            border-width: 2px;
+        }
+
+        /* Header confidence display */
+        .header-confidence {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+        }
+
+        .header-confidence .label {
+            color: #888;
+            font-size: 12px;
+        }
+
+        .header-confidence .value {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        /* Review low confidence button */
+        .btn-review-low {
+            background: #f59e0b;
+            color: #1a1a2e;
+            font-weight: 600;
+        }
+
+        .btn-review-low:hover {
+            background: #fbbf24;
+        }
+
+        .btn-review-low.active {
+            background: #dc2626;
+            color: white;
+        }
+
+        .btn-review-low.active:hover {
+            background: #ef4444;
+        }
+
+        .btn-review-low .count {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 1px 6px;
+            border-radius: 10px;
+            margin-left: 4px;
+            font-size: 11px;
+        }
+
+        /* Low confidence verification panel */
+        .low-confidence-info {
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid #f59e0b;
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-bottom: 10px;
+            font-size: 12px;
+            color: #f59e0b;
+        }
+
         /* Dashboard welcome screen */
         .welcome-screen {
             flex: 1;
@@ -744,10 +851,17 @@
             {% if catalog_name %}
             <span><span id="total-pages">{{ total_pages }}</span> pages</span>
             <span><span id="product-count">{{ total_products }}</span> products</span>
+            <div class="header-confidence" id="header-confidence" style="display: none;">
+                <span class="label">Confidence:</span>
+                <span class="value" id="overall-confidence">--</span>
+            </div>
             {% endif %}
         </div>
         <div class="header-actions" id="header-actions">
             {% if catalog_name %}
+            <button class="btn btn-review-low" id="review-low-btn" onclick="toggleLowConfidenceMode()" style="display: none;">
+                Review Low <span class="count" id="low-confidence-count">0</span>
+            </button>
             <button class="btn btn-verify" id="verify-btn" onclick="toggleVerificationMode()">Start Verification</button>
             <button class="btn btn-secondary" onclick="addProduct()">+ Add Product</button>
             <button class="btn btn-primary" onclick="saveSession()">Save</button>
@@ -866,14 +980,14 @@
                 <textarea id="edit-product-name"></textarea>
             </div>
             <div class="form-group">
-                <label>Description / Count</label>
-                <input type="text" id="edit-description">
+                <label>Description (optional)</label>
+                <input type="text" id="edit-description" placeholder="Additional details if needed">
+            </div>
+            <div class="form-group">
+                <label>Item # (combined identifiers separated by " / ")</label>
+                <input type="text" id="edit-item-no">
             </div>
             <div class="form-row">
-                <div class="form-group">
-                    <label>Item #</label>
-                    <input type="text" id="edit-item-no">
-                </div>
                 <div class="form-group">
                     <label>Package</label>
                     <input type="text" id="edit-pkg">
@@ -928,6 +1042,12 @@
             'uom': 'UOM'
         };
 
+        // Low-confidence review mode state
+        let lowConfidenceMode = false;
+        let lowConfidenceProducts = [];
+        let currentLowConfidenceIndex = 0;
+        const CONFIDENCE_THRESHOLD = 95.0;
+
         // DOM elements
         const pdfImage = document.getElementById('pdf-image');
         const productsContainer = document.getElementById('products-container');
@@ -941,6 +1061,7 @@
             loadCatalogs();
             if (!dashboardMode && totalPages > 0) {
                 loadPage(1);
+                loadConfidenceStats();
             }
             setupKeyboardShortcuts();
         });
@@ -1268,11 +1389,20 @@
             container.innerHTML = products.map((p, i) => {
                 // Escape ID for use in data attributes (IDs are UUIDs but be safe)
                 const safeId = escapeHtml(p.id);
+                const confidence = p.confidence !== undefined ? p.confidence : 100;
+                const confClass = getConfidenceClass(confidence);
+                const cardClass = confidence < 80 ? 'very-low-confidence' : (confidence < 95 ? 'low-confidence' : '');
                 return `
-                <div class="product-card ${selectedProductId === p.id ? 'selected' : ''}"
+                <div class="product-card ${selectedProductId === p.id ? 'selected' : ''} ${cardClass}"
                      data-id="${safeId}" data-action="select">
                     <div class="product-header">
-                        <span class="product-item-no">#${escapeHtml(p.item_no) || '?'}</span>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span class="product-item-no">#${escapeHtml(p.item_no) || '?'}</span>
+                            <span class="confidence-badge confidence-${confClass}">
+                                <span class="confidence-dot ${confClass}"></span>
+                                ${Math.round(confidence)}%
+                            </span>
+                        </div>
                         <div class="product-actions">
                             <button data-action="edit" data-id="${safeId}">Edit</button>
                             <button data-action="delete" data-id="${safeId}">Delete</button>
@@ -1280,10 +1410,7 @@
                     </div>
                     <div class="product-name">${escapeHtml(p.product_name)}</div>
                     <div class="product-details">
-                        <div class="product-detail">
-                            <label>Desc:</label>
-                            <span>${escapeHtml(p.description) || '-'}</span>
-                        </div>
+                        ${p.description ? `<div class="product-detail"><label>Desc:</label><span>${escapeHtml(p.description)}</span></div>` : ''}
                         <div class="product-detail">
                             <label>Pkg:</label>
                             <span>${escapeHtml(p.pkg) || '-'}</span>
@@ -1395,6 +1522,7 @@
                     closeModal();
                     loadPage(currentPage);
                     updateProductCount();
+                    loadConfidenceStats();  // Refresh confidence stats
                 } else {
                     showToast('Error saving product', 'error');
                 }
@@ -1418,6 +1546,7 @@
                     showToast('Product deleted', 'success');
                     loadPage(currentPage);
                     updateProductCount();
+                    loadConfidenceStats();  // Refresh confidence stats
                 } else {
                     showToast('Error deleting product', 'error');
                 }
@@ -1439,6 +1568,8 @@
                 if (result.success) {
                     hasUnsavedChanges = false;
                     showToast(`Saved ${result.products_count} products`, 'success');
+                    // Refresh confidence stats after save
+                    loadConfidenceStats();
                 } else {
                     showToast('Error saving session', 'error');
                 }
@@ -1513,6 +1644,58 @@
             }
         }
 
+        // ============================================
+        // Confidence Display Functions
+        // ============================================
+
+        function getConfidenceClass(score) {
+            if (score >= 95) return 'high';
+            if (score >= 80) return 'medium';
+            return 'low';
+        }
+
+        function getConfidenceColor(score) {
+            if (score >= 95) return '#10b981';  // green
+            if (score >= 80) return '#f59e0b';  // yellow
+            return '#ef4444';  // red
+        }
+
+        async function loadConfidenceStats() {
+            if (dashboardMode) return;
+
+            try {
+                const response = await fetch('/api/stats');
+                const data = await response.json();
+
+                // Update overall confidence display
+                const confidenceEl = document.getElementById('header-confidence');
+                const valueEl = document.getElementById('overall-confidence');
+                if (confidenceEl && valueEl) {
+                    confidenceEl.style.display = 'flex';
+                    const score = data.overall_confidence || 0;
+                    valueEl.textContent = Math.round(score) + '%';
+                    valueEl.style.color = getConfidenceColor(score);
+                }
+
+                // Update low confidence button
+                const reviewBtn = document.getElementById('review-low-btn');
+                const countEl = document.getElementById('low-confidence-count');
+                if (reviewBtn && countEl) {
+                    const count = data.low_confidence_count || 0;
+                    countEl.textContent = count;
+                    lowConfidenceProducts = data.low_confidence_products || [];
+
+                    if (count > 0) {
+                        reviewBtn.style.display = 'inline-flex';
+                    } else {
+                        reviewBtn.style.display = 'none';
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to load confidence stats:', err);
+            }
+        }
+
         // Utilities
         function escapeHtml(text) {
             if (text == null) return '';
@@ -1538,6 +1721,11 @@
         function toggleVerificationMode() {
             if (dashboardMode) return;
 
+            // Exit low-confidence mode if active
+            if (lowConfidenceMode) {
+                exitLowConfidenceMode();
+            }
+
             verificationMode = !verificationMode;
             const btn = document.getElementById('verify-btn');
             const panel = document.getElementById('verification-panel');
@@ -1561,7 +1749,134 @@
             }
         }
 
+        // ============================================
+        // Low Confidence Review Mode Functions
+        // ============================================
+
+        async function toggleLowConfidenceMode() {
+            if (dashboardMode) return;
+
+            // Exit regular verification mode if active
+            if (verificationMode) {
+                toggleVerificationMode();
+            }
+
+            lowConfidenceMode = !lowConfidenceMode;
+            const btn = document.getElementById('review-low-btn');
+            const panel = document.getElementById('verification-panel');
+            const verifyBtn = document.getElementById('verify-btn');
+
+            if (lowConfidenceMode) {
+                // Refresh the low confidence products list
+                await loadConfidenceStats();
+
+                if (lowConfidenceProducts.length === 0) {
+                    showToast('No low confidence items to review!', 'success');
+                    lowConfidenceMode = false;
+                    return;
+                }
+
+                btn.textContent = 'Exit Review';
+                btn.classList.add('active');
+                panel.classList.add('active');
+                verifyBtn.style.display = 'none';  // Hide regular verify button
+
+                currentLowConfidenceIndex = 0;
+                currentFieldIndex = 0;
+                await navigateToLowConfidenceProduct();
+            } else {
+                exitLowConfidenceMode();
+            }
+        }
+
+        function exitLowConfidenceMode() {
+            lowConfidenceMode = false;
+            const btn = document.getElementById('review-low-btn');
+            const panel = document.getElementById('verification-panel');
+            const verifyBtn = document.getElementById('verify-btn');
+
+            btn.innerHTML = 'Review Low <span class="count" id="low-confidence-count">' + lowConfidenceProducts.length + '</span>';
+            btn.classList.remove('active');
+            panel.classList.remove('active');
+            verifyBtn.style.display = 'inline-block';  // Show regular verify button
+        }
+
+        async function navigateToLowConfidenceProduct() {
+            if (!lowConfidenceMode || lowConfidenceProducts.length === 0) return;
+
+            const item = lowConfidenceProducts[currentLowConfidenceIndex];
+
+            // Navigate to the correct page if needed
+            if (item.page !== currentPage) {
+                await loadPage(item.page);
+            }
+
+            // Find this product in the current page's products
+            const productIndex = products.findIndex(p => p.id === item.id);
+            if (productIndex >= 0) {
+                currentProductIndex = productIndex;
+                currentFieldIndex = 0;
+                showCurrentFieldLowConfidence();
+            } else {
+                // Product not found on page - might have been deleted, skip it
+                showToast('Product not found, skipping...', 'error');
+                nextLowConfidenceProduct();
+            }
+        }
+
+        function showCurrentFieldLowConfidence() {
+            if (!lowConfidenceMode || products.length === 0) return;
+
+            const product = products[currentProductIndex];
+            const item = lowConfidenceProducts[currentLowConfidenceIndex];
+            const fieldName = VERIFICATION_FIELDS[currentFieldIndex];
+            const fieldValue = product[fieldName] || '';
+
+            // Update UI
+            document.getElementById('field-label').textContent = FIELD_LABELS[fieldName];
+            document.getElementById('field-progress').textContent =
+                `${currentFieldIndex + 1}/${VERIFICATION_FIELDS.length}`;
+            document.getElementById('product-progress').textContent =
+                `${currentLowConfidenceIndex + 1}/${lowConfidenceProducts.length} (${Math.round(item.score)}% confidence)`;
+
+            // Set input value
+            const input = document.getElementById('verification-input');
+            input.value = fieldValue;
+            input.focus();
+            input.select();
+
+            // Highlight the product card
+            selectProduct(product.id);
+        }
+
+        async function nextLowConfidenceProduct() {
+            currentLowConfidenceIndex++;
+            if (currentLowConfidenceIndex >= lowConfidenceProducts.length) {
+                showToast('All low confidence items reviewed!', 'success');
+                exitLowConfidenceMode();
+                // Refresh stats to update counts
+                await loadConfidenceStats();
+                return;
+            }
+            currentFieldIndex = 0;
+            await navigateToLowConfidenceProduct();
+        }
+
+        async function prevLowConfidenceProduct() {
+            if (currentLowConfidenceIndex > 0) {
+                currentLowConfidenceIndex--;
+                currentFieldIndex = 0;
+                await navigateToLowConfidenceProduct();
+            }
+        }
+
         function showCurrentField() {
+            // Route to appropriate handler based on mode
+            if (lowConfidenceMode) {
+                showCurrentFieldLowConfidence();
+                return;
+            }
+
             if (!verificationMode || products.length === 0) return;
 
             const product = products[currentProductIndex];
@@ -1585,7 +1900,18 @@
             selectProduct(product.id);
         }
 
-        function nextField() {
+        async function nextField() {
+            if (lowConfidenceMode) {
+                currentFieldIndex++;
+                if (currentFieldIndex >= VERIFICATION_FIELDS.length) {
+                    // Move to next low-confidence product
+                    await nextLowConfidenceProduct();
+                    return;
+                }
+                showCurrentFieldLowConfidence();
+                return;
+            }
+
             if (!verificationMode) return;
 
             currentFieldIndex++;
@@ -1603,7 +1929,27 @@
             showCurrentField();
         }
 
-        function prevField() {
+        async function prevField() {
+            if (lowConfidenceMode) {
+                currentFieldIndex--;
+                if (currentFieldIndex < 0) {
+                    // Move to previous low-confidence product (last field)
+                    if (currentLowConfidenceIndex > 0) {
+                        currentLowConfidenceIndex--;
+                        currentFieldIndex = VERIFICATION_FIELDS.length - 1;
+                        await navigateToLowConfidenceProduct();
+                        currentFieldIndex = VERIFICATION_FIELDS.length - 1; // Reset after navigation
+                        showCurrentFieldLowConfidence();
+                    } else {
+                        currentFieldIndex = 0;
+                        showCurrentFieldLowConfidence();
+                    }
+                } else {
+                    showCurrentFieldLowConfidence();
+                }
+                return;
+            }
+
             if (!verificationMode) return;
 
             currentFieldIndex--;
@@ -1620,7 +1966,8 @@
         }
 
         async function confirmField() {
-            if (!verificationMode || products.length === 0) return;
+            if (!verificationMode && !lowConfidenceMode) return;
+            if (products.length === 0) return;
 
             const product = products[currentProductIndex];
             const fieldName = VERIFICATION_FIELDS[currentFieldIndex];
@@ -1654,19 +2001,23 @@
             }
 
             // Move to next field
-            nextField();
+            await nextField();
         }
 
-        function skipField() {
-            if (!verificationMode) return;
-            nextField();
+        async function skipField() {
+            if (!verificationMode && !lowConfidenceMode) return;
+            await nextField();
         }
 
         // Override keyboard shortcuts for verification mode
         function setupKeyboardShortcuts() {
             document.addEventListener('keydown', (e) => {
-                // Always allow Escape to exit verification mode or close modal
+                // Always allow Escape to exit verification/low-confidence mode or close modal
                 if (e.key === 'Escape') {
+                    if (lowConfidenceMode) {
+                        exitLowConfidenceMode();
+                        return;
+                    }
                     if (verificationMode) {
                         toggleVerificationMode();
                         return;
@@ -1675,8 +2026,8 @@
                     return;
                 }
 
-                // In verification mode with focus on verification input
-                if (verificationMode && e.target.id === 'verification-input') {
+                // In verification/low-confidence mode with focus on verification input
+                if ((verificationMode || lowConfidenceMode) && e.target.id === 'verification-input') {
                     if (e.key === 'Enter') {
                         e.preventDefault();
                         confirmField();
@@ -1696,8 +2047,8 @@
                 // Skip if in other input fields
                 if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
-                // Verification mode shortcuts
-                if (verificationMode) {
+                // Verification/low-confidence mode shortcuts
+                if (verificationMode || lowConfidenceMode) {
                     if (e.key === 'ArrowLeft') {
                         prevField();
                     } else if (e.key === 'ArrowRight') {
