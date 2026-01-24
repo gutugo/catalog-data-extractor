@@ -938,41 +938,41 @@ class PDFReader:
             return []
 
         try:
-            doc = pymupdf.open(str(self.pdf_path))
-            # PyMuPDF uses 0-indexed pages
-            page = doc[page_num - 1]
+            # Use context manager to ensure document is closed even on exception
+            with pymupdf.open(str(self.pdf_path)) as doc:
+                # PyMuPDF uses 0-indexed pages
+                page = doc[page_num - 1]
 
-            # Find tables on the page
-            tabs = page.find_tables()
-            tables = []
+                # Find tables on the page
+                tabs = page.find_tables()
+                tables = []
 
-            for tab in tabs:
-                # Get table bounding box
-                table_bbox = tuple(tab.bbox) if tab.bbox else None
+                for tab in tabs:
+                    # Get table bounding box
+                    table_bbox = tuple(tab.bbox) if tab.bbox else None
 
-                table_data = {
-                    'bbox': table_bbox,
-                    'rows': []
-                }
+                    table_data = {
+                        'bbox': table_bbox,
+                        'rows': []
+                    }
 
-                # Extract table content
-                # tab.extract() returns list of rows, each row is list of cell strings
-                for row in tab.extract():
-                    row_data = []
-                    for cell in row:
-                        cell_text = str(cell) if cell is not None else ''
-                        row_data.append({
-                            'text': cell_text.strip(),
-                            'bbox': None
-                        })
-                    if row_data:
-                        table_data['rows'].append(row_data)
+                    # Extract table content
+                    # tab.extract() returns list of rows, each row is list of cell strings
+                    for row in tab.extract():
+                        row_data = []
+                        for cell in row:
+                            cell_text = str(cell) if cell is not None else ''
+                            row_data.append({
+                                'text': cell_text.strip(),
+                                'bbox': None
+                            })
+                        if row_data:
+                            table_data['rows'].append(row_data)
 
-                if table_data['rows']:
-                    tables.append(table_data)
+                    if table_data['rows']:
+                        tables.append(table_data)
 
-            doc.close()
-            return tables
+                return tables
 
         except Exception as e:
             warning_msg = f"PyMuPDF failed on page {page_num}: {e}"

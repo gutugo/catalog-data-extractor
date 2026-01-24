@@ -1635,21 +1635,22 @@ class AutoExtractor:
         """Merge products from multiple extractors.
 
         Strategy:
-        - Match products by item_no
+        - Match products by item_no AND page_number (same product on same page)
         - For each field, pick highest confidence value
         - Combine field_locations from best sources
         """
-        # Group products by item_no
-        by_item_no: dict[str, list[Product]] = defaultdict(list)
+        # Group products by (item_no, page_number) to avoid merging products from different pages
+        by_key: dict[tuple[str, int], list[Product]] = defaultdict(list)
 
         for product_list in product_lists:
             for product in product_list:
                 if product.item_no:
-                    by_item_no[product.item_no].append(product)
+                    key = (product.item_no, product.page_number)
+                    by_key[key].append(product)
 
         merged_products = []
 
-        for item_no, products in by_item_no.items():
+        for (item_no, page_num), products in by_key.items():
             if len(products) == 1:
                 # Only one extraction found this product
                 merged_products.append(products[0])
