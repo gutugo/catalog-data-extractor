@@ -45,6 +45,8 @@ The extractor automatically classifies PDFs and selects the best extraction meth
 
 4. **Fallback** - Merges results from all methods if no single method is sufficient, then tries regex as last resort
 
+5. **Validation** - Filters out false positives (spec data mistaken for products)
+
 ### Available Methods (by confidence)
 
 | Method | Confidence | Best For |
@@ -108,6 +110,19 @@ Uses multi-signal approach for robust column mapping:
 3. **Column width heuristics** - Narrow columns often contain codes, wide columns contain descriptions
 4. **Cross-row consistency** - Same pattern across multiple rows indicates field type
 
+## Product Validation
+
+Filters out false positives from brochure-style catalogs that have specification tables instead of product listings. Rejects:
+
+- **Measurements**: 75kg, 200cm, 10mm, dimensions (200x85cm)
+- **Electrical specs**: 12V, 220V, 50Hz, IPX4 ratings
+- **Standards codes**: BS 7177, EN 597-1, ISO 9001
+- **Time/range values**: 10Minutes, 10-20
+- **Pure alphabetic values**: Real SKUs almost always contain digits
+- **Multi-word descriptions**: Text with spaces (unless combined identifiers like "UPC / SKU")
+
+**Note:** This app is designed for **product listing catalogs** with SKUs, item numbers, prices, and quantities. Marketing brochures with product descriptions and spec tables will correctly return 0 products.
+
 ## Docling (IBM AI Extraction)
 
 ### Model Cache
@@ -165,7 +180,10 @@ du -sh ~/.cache/huggingface/hub/models--docling-project*
 ```
 
 ### Empty extractions
-Check available methods - some require optional dependencies:
+**If 0 products extracted:**
+1. Check if it's a product listing catalog (has SKUs/item numbers) vs a brochure (just descriptions)
+2. Brochures correctly return 0 products - they're not compatible with this tool
+3. Check available methods - some require optional dependencies:
 ```bash
 uv run python -c "from extractor.pdf_reader import *; print('Docling:', DOCLING_AVAILABLE); print('Camelot:', CAMELOT_AVAILABLE)"
 ```
