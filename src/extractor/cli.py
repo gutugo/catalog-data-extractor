@@ -1,5 +1,7 @@
 """CLI interface for catalog data extractor."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional
 
@@ -399,7 +401,9 @@ def web_verify(
             webbrowser.open(f"http://{host}:{port}")
 
         # Open browser after a short delay (port was verified available)
-        threading.Timer(1.0, open_browser).start()
+        timer = threading.Timer(1.0, open_browser)
+        timer.daemon = True  # Don't block process exit
+        timer.start()
 
         # Run the web server in dashboard mode
         run_web_verifier(host=host, port=port, dashboard_mode=True)
@@ -457,7 +461,9 @@ def web_verify(
         webbrowser.open(f"http://{host}:{port}")
 
     # Open browser after a short delay (port was verified available)
-    threading.Timer(1.0, open_browser).start()
+    timer = threading.Timer(1.0, open_browser)
+    timer.daemon = True  # Don't block process exit
+    timer.start()
 
     # Run the web server
     run_web_verifier(pdf_path, session, SESSIONS_DIR, host=host, port=port)

@@ -1,5 +1,7 @@
 """Web-based verification UI for catalog data extraction."""
 
+from __future__ import annotations
+
 import atexit
 import io
 import os
@@ -62,7 +64,7 @@ def _generate_csrf_token() -> str:
 def _verify_csrf_token(token: str | None) -> bool:
     """Verify CSRF token matches."""
     if not _csrf_token:
-        return True  # CSRF not initialized (shouldn't happen)
+        return False  # CSRF not initialized - reject for security
     return token == _csrf_token
 
 
@@ -690,9 +692,11 @@ def _find_product_by_id(session: ExtractionSession, product_id: str) -> tuple[Pr
     # Index miss or stale - rebuild and try again
     _state['product_index'] = _build_product_index(session)
     index = _state['product_index'].get(product_id)
-    # Add bounds check after rebuild
+    # Add bounds check and ID verification after rebuild
     if index is not None and index < len(session.products):
-        return session.products[index], index
+        product = session.products[index]
+        if product.id == product_id:
+            return product, index
 
     return None, -1
 

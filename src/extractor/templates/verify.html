@@ -1186,6 +1186,7 @@
                 let statusBadge = '';
                 let action = 'switch';
                 let meta = `${c.products_count} products`;
+                let showReextract = false;
 
                 if (c.status === 'uploaded') {
                     statusBadge = '<span class="catalog-status status-uploaded">Not extracted</span>';
@@ -1194,11 +1195,50 @@
                 } else if (c.status === 'extracting') {
                     statusBadge = '<span class="catalog-status status-extracting">Extracting...</span>';
                     action = '';
-                    meta = 'Please wait...';
+                    // Show progress if available
+                    if (c.progress && c.progress.total_pages > 0) {
+                        const pct = Math.round((c.progress.page / c.progress.total_pages) * 100);
+                        meta = `Page ${c.progress.page}/${c.progress.total_pages} (${c.progress.products} products)`;
+                    } else {
+                        meta = 'Starting...';
+                    }
+                } else if (c.status === 'ready' || c.status === 'exported' || c.status === 'completed') {
+                    // Show re-extract button for catalogs with existing sessions
+                    // 'completed' status appears briefly after extraction finishes
+                    showReextract = true;
+                    if (c.status === 'exported') {
+                        statusBadge = '<span class="catalog-status status-exported">Exported</span>';
+                    } else {
+                        statusBadge = '<span class="catalog-status status-ready">Ready</span>';
+                    }
+                    // Get product count from either products_count or progress.products
+                    const productCount = c.products_count || (c.progress && c.progress.products) || 0;
+                    meta = `${productCount} products`;
+                } else if (c.status === 'error') {
+                    // Allow retry after error
+                    showReextract = true;
+                    statusBadge = '<span class="catalog-status status-error">Error</span>';
+                    meta = c.error ? c.error.substring(0, 30) : 'Extraction failed';
                 }
 
                 // Use data attributes instead of inline onclick to prevent XSS
                 const dataAttrs = action ? `data-catalog="${escapeHtml(c.name)}" data-action="${action}"` : '';
+                const reextractBtn = showReextract
+                    ? `<div class="catalog-item-actions">
+                           <button class="btn-extract" data-catalog="${escapeHtml(c.name)}" data-action="reextract">Re-extract</button>
+                       </div>`
+                    : '';
+
+                // Progress bar for extracting status
+                let progressBar = '';
+                if (c.status === 'extracting' && c.progress && c.progress.total_pages > 0) {
+                    const pct = Math.round((c.progress.page / c.progress.total_pages) * 100);
+                    progressBar = `<div class="progress-bar"><div class="progress-bar-fill" style="width: ${pct}%"></div></div>`;
+                } else if (c.status === 'extracting') {
+                    // Indeterminate progress bar for starting phase
+                    progressBar = `<div class="progress-bar"><div class="progress-bar-fill" style="width: 5%"></div></div>`;
+                }
+
                 return `
                     <div class="catalog-item ${isActive ? 'active' : ''}" ${dataAttrs}>
                         <div class="catalog-item-name">${escapeHtml(c.name)}</div>
@@ -1206,18 +1246,34 @@
                             <span>${meta}</span>
                             ${statusBadge}
                         </div>
+                        ${progressBar}
+                        ${reextractBtn}
                     </div>
                 `;
             }).join('');
 
             // Use event delegation for catalog clicks (XSS-safe)
             container.querySelectorAll('.catalog-item[data-catalog]').forEach(item => {
-                item.addEventListener('click', function() {
+                item.addEventListener('click', function(e) {
+                    // Don't trigger switch if clicking the re-extract button
+                    if (e.target.dataset.action === 'reextract') return;
+
                     const name = this.dataset.catalog;
                     const action = this.dataset.action;
                     if (action === 'switch') {
                         switchCatalog(name);
                     } else if (action === 'extract') {
+                        startExtraction(name);
+                    }
+                });
+            });
+
+            // Handle re-extract button clicks separately
+            container.querySelectorAll('button[data-action="reextract"]').forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();  // Don't trigger catalog switch
+                    const name = this.dataset.catalog;
+                    if (confirm(`Re-extract "${name}" with ${getSelectedMethod()} method?\n\nThis will replace the existing extraction.`)) {
                         startExtraction(name);
                     }
                 });
@@ -1340,26 +1396,26 @@
         }
 
         async function pollExtractionStatus(name) {
-            const checkStatus = async () => {
-                const response = await fetch(`/api/extract/${encodeURIComponent(name)}/status`);
-                const data = await response.json();
-                return data;
-            };
-
             // Poll until done (max 10 minutes = 1200 attempts at 500ms each)
             const maxAttempts = 1200;
             let attempts = 0;
+            let lastRefresh = 0;
 
             while (attempts < maxAttempts) {
                 attempts++;
                 try {
-                    const data = await checkStatus();
+                    // Refresh catalog list every 2 seconds to update progress bar
+                    const now = Date.now();
+                    if (now - lastRefresh > 2000) {
+                        await loadCatalogs();
+                        lastRefresh = now;
+                    }
+
+                    const response = await fetch(`/api/extract/${encodeURIComponent(name)}/status`);
+                    const data = await response.json();
 
                     if (data.status === 'extracting') {
-                        const p = data.progress;
-                        if (p && p.total_pages > 0) {
-                            showToast(`Extracting: page ${p.page}/${p.total_pages} (${p.products} products)`, 'success');
-                        }
+                        // Progress shown in catalog list, just continue polling
                     } else if (data.status === 'completed') {
                         showToast(`Done! ${data.progress?.products || 0} products. Reloading...`, 'success');
                         setTimeout(() => {

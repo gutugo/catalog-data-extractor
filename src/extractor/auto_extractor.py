@@ -1,5 +1,7 @@
 """Automatic extraction logic for catalog data using table-aware parsing."""
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
 from collections import defaultdict
@@ -748,7 +750,8 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
                     uom = price_uom_match.group(1).lower()
                     break
                 # Stop if we hit another item marker
-                if ITEM_PREFIX_PATTERN.search(next_line) or is_valid_item_no(next_line.split()[0] if next_line.split() else ''):
+                next_line_parts = next_line.split()
+                if ITEM_PREFIX_PATTERN.search(next_line) or is_valid_item_no(next_line_parts[0] if next_line_parts else ''):
                     break
                 # Accumulate additional description
                 if next_line and not next_line.startswith('$'):

@@ -93,6 +93,7 @@ class PDFReader:
         self.pdf_path = Path(pdf_path)
         self._pdf: Optional[pdfplumber.PDF] = None
         self._docling_result = None  # Cache for Docling conversion (expensive)
+        self._docling_lock = threading.Lock()  # Thread-safe cache access
 
     def __enter__(self) -> "PDFReader":
         self._pdf = pdfplumber.open(self.pdf_path)
@@ -410,12 +411,12 @@ class PDFReader:
             return []
 
         try:
-            # Cache Docling conversion result (expensive operation)
-            if self._docling_result is None:
-                converter = DocumentConverter()
-                self._docling_result = converter.convert(str(self.pdf_path))
-
-            result = self._docling_result
+            # Cache Docling conversion result (expensive operation) - thread-safe
+            with self._docling_lock:
+                if self._docling_result is None:
+                    converter = DocumentConverter()
+                    self._docling_result = converter.convert(str(self.pdf_path))
+                result = self._docling_result
             tables = []
 
             # Docling uses iterate_items() to access document elements
@@ -457,8 +458,9 @@ class PDFReader:
                                     })
                                 if row_data:
                                     table_data['rows'].append(row_data)
-                        except Exception:
-                            pass  # Fall through to data.table_cells
+                        except Exception as e:
+                            # Log and fall through to data.table_cells
+                            print(f"Debug: export_to_dataframe failed: {e}", file=sys.stderr)
 
                     # Fallback: access data.table_cells directly
                     if not table_data['rows'] and hasattr(item, 'data') and item.data:
