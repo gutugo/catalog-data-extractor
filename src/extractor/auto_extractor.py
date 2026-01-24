@@ -119,6 +119,51 @@ HEADER_PATTERNS = [
     re.compile(r'^Product\s*(Name|Code)?$', re.IGNORECASE),
 ]
 
+# False positive patterns - specification values that look like item numbers
+# These are commonly found in product brochures/spec sheets, not product listings
+FALSE_POSITIVE_PATTERNS = [
+    # Measurements with units (75kg, 200cm, 10mm, 5m, 12inches)
+    re.compile(r'^\d+\.?\d*\s*(kg|g|lb|oz|cm|mm|m|inches?|in|ft|feet)\.?$', re.IGNORECASE),
+    # Dimension patterns (200x85x203cm, 29x185cm, 10x20)
+    re.compile(r'^\d+\.?\d*\s*x\s*\d+', re.IGNORECASE),
+    # Dimension with slash (210/250mm, 100/200cm)
+    re.compile(r'^\d+\s*/\s*\d+\s*(mm|cm|m|kg|g).*$', re.IGNORECASE),
+    # Dimension with diameter (205mmdiameter)
+    re.compile(r'^\d+\s*(mm|cm|m)\s*diameter$', re.IGNORECASE),
+    # Time values (10Minutes, 5Hours, 30Seconds, 2hrs)
+    re.compile(r'^\d+\.?\d*\s*(minutes?|mins?|hours?|hrs?|seconds?|secs?|days?)\.?$', re.IGNORECASE),
+    # Comma-separated time/value lists (10, 15, 20, 25mins)
+    re.compile(r'^[\d,\s]+\s*(mins?|hours?|secs?)$', re.IGNORECASE),
+    # Percentage values (50%, 99.9%)
+    re.compile(r'^\d+\.?\d*\s*%$'),
+    # Temperature values (37°C, 98.6°F, 25C, 77F)
+    re.compile(r'^\d+\.?\d*\s*°?[CF]$', re.IGNORECASE),
+    # Voltage/current/power (12V, 220V, 5A, 100W, 50Hz)
+    re.compile(r'^\d+\.?\d*\s*(V|A|W|Hz|kW|mA|VA)$', re.IGNORECASE),
+    # Pressure values (10bar, 100psi, 5kPa)
+    re.compile(r'^\d+\.?\d*\s*(bar|psi|kPa|MPa|Pa)$', re.IGNORECASE),
+    # Capacity/volume (5L, 500ml, 10gal)
+    re.compile(r'^\d+\.?\d*\s*(L|ml|gal|liters?|litres?)$', re.IGNORECASE),
+    # Speed/rate values (100rpm, 50m/s)
+    re.compile(r'^\d+\.?\d*\s*(rpm|m/s|km/h|mph)$', re.IGNORECASE),
+    # Range patterns (10-20, 5~10)
+    re.compile(r'^\d+\.?\d*\s*[-~]\s*\d+\.?\d*$'),
+    # IP ratings (IPX4, IP65, IP67)
+    re.compile(r'^IP[X\d]\d?$', re.IGNORECASE),
+    # Class ratings (Class1, Class 2, ClassII)
+    re.compile(r'^Class\s*[1-9IVX]+$', re.IGNORECASE),
+    # Standards codes (BS 7177, EN 597-1, ISO 9001)
+    re.compile(r'^(BS|EN|ISO|IEC|ANSI|UL|CE|CSA)\s*\d+', re.IGNORECASE),
+    # Spec labels ending with colon (Weight:, Size:, Dimensions:)
+    re.compile(r'^[A-Za-z\s]+:$'),
+    # Pure descriptive words that might slip through
+    re.compile(r'^(Yes|No|N/?A|None|Standard|Optional|Included|Available)$', re.IGNORECASE),
+    # Descriptive phrases with measurements embedded (20 cm side bolster, High MVTR 4 stretch)
+    re.compile(r'^\d+\s*(cm|mm|m)\s+\w+', re.IGNORECASE),
+    # Text with embedded numbers that aren't codes (High MVTR 4 stretch PU)
+    re.compile(r'^[A-Za-z]+\s+[A-Za-z]*\s*\d+\s+[A-Za-z]+', re.IGNORECASE),
+]
+
 # Identifier column header patterns - maps header text to field name
 # Order matters: more specific patterns should come first
 IDENTIFIER_HEADER_PATTERNS = {
@@ -223,6 +268,104 @@ def is_valid_item_no(value: str) -> bool:
     if not value:
         return False
     return bool(ITEM_NO_PATTERN.match(value.strip()))
+
+
+def is_false_positive_item_no(value: str) -> bool:
+    """Check if value is a false positive - looks like item_no but is actually spec data.
+
+    Detects specification values commonly found in product brochures:
+        - Measurements: 75kg, 200cm, 10mm
+        - Dimensions: 200x85x203cm, 29x185cm
+        - Time values: 10Minutes, 5Hours
+        - Electrical: 12V, 220V, 5A
+        - Plain words without digits: "Nylon", "Black", "Analog Pump"
+        - And other spec patterns
+
+    Args:
+        value: The candidate item_no string
+
+    Returns:
+        True if this looks like specification data (false positive)
+    """
+    if not value:
+        return False
+
+    # Clean up the value - remove newlines, extra whitespace
+    cleaned = re.sub(r'\s+', '', value.strip())
+
+    for pattern in FALSE_POSITIVE_PATTERNS:
+        if pattern.match(cleaned):
+            return True
+
+    # Check for measurements embedded in text (20cmsidebolster, 100mmwidth)
+    if re.search(r'\d+(cm|mm|m|kg|g|L|ml)\w+', cleaned, re.IGNORECASE):
+        return True
+
+    # Check for long concatenated words that look like descriptions, not codes
+    # Real SKUs are typically short (< 20 chars) and use specific patterns
+    if len(cleaned) > 15 and re.match(r'^[A-Za-z]+\d+[A-Za-z]+', cleaned):
+        # Contains letters-digits-letters pattern and is long - likely concatenated description
+        return True
+
+    # Additional heuristic: if it contains newlines, likely a spec cell
+    if '\n' in value:
+        return True
+
+    # Real SKUs/item numbers almost always contain at least one digit
+    # Pure alphabetic values like "Nylon", "Black", "Analog Pump" are specs
+    if not any(c.isdigit() for c in cleaned):
+        return True
+
+    # Real item numbers rarely contain spaces - if it has multiple words, likely a description
+    # Exception: combined identifiers like "UPC / SKU" format
+    value_stripped = value.strip()
+    if ' ' in value_stripped and ' / ' not in value_stripped:
+        # Has spaces but isn't a combined identifier
+        # Check if it looks like a sentence/description (3+ words)
+        words = value_stripped.split()
+        if len(words) >= 3:
+            return True
+        # Check if it has lowercase words (descriptions often do, codes don't)
+        if any(w.islower() or (w[0].isupper() and w[1:].islower()) for w in words if len(w) > 1):
+            return True
+
+    return False
+
+
+def validate_product(product: 'Product') -> bool:
+    """Validate that a product looks like a real product, not spec data.
+
+    Args:
+        product: Product to validate
+
+    Returns:
+        True if product appears valid, False if it's likely a false positive
+    """
+    # Check if item_no is a false positive
+    if is_false_positive_item_no(product.item_no):
+        return False
+
+    # Check if product_name looks like a spec label (ends with :)
+    if product.product_name and product.product_name.strip().endswith(':'):
+        return False
+
+    # Check if product_name is too short (likely a spec label)
+    if product.product_name and len(product.product_name.strip()) < 3:
+        return False
+
+    return True
+
+
+def filter_valid_products(products: list['Product']) -> list['Product']:
+    """Filter out false positive products from extraction results.
+
+    Args:
+        products: List of extracted products
+
+    Returns:
+        Filtered list with false positives removed
+    """
+    return [p for p in products if validate_product(p)]
 
 
 def is_header_row(row: list[str]) -> bool:
@@ -1212,6 +1355,8 @@ class AutoExtractor:
                 continue
 
             products = method_func(reader, page_num)
+            # Filter out false positives (spec data mistaken for products)
+            products = filter_valid_products(products)
             all_results.append((method_name, products))
 
             if len(products) >= MIN_PRODUCTS_THRESHOLD:
@@ -1239,6 +1384,8 @@ class AutoExtractor:
             all_product_lists = [products for _, products in all_results if products]
             if all_product_lists:
                 merged = self._merge_extractions(*all_product_lists)
+                # Filter merged results too
+                merged = filter_valid_products(merged)
                 if merged:
                     self.pipeline_stats['merged'] += 1
                     return merged
@@ -1246,6 +1393,8 @@ class AutoExtractor:
         # Last resort: regex fallback on raw text
         page_content = reader.get_page(page_num)
         fallback_products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+        # Filter fallback results
+        fallback_products = filter_valid_products(fallback_products)
         if fallback_products:
             self.pipeline_stats['regex_fallback'] += 1
             return fallback_products
