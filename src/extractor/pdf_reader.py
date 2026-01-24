@@ -67,6 +67,24 @@ try:
 except ImportError:
     PYMUPDF4LLM_AVAILABLE = False
 
+# PyMuPDF (fitz) - fast PDF library with table extraction
+try:
+    import pymupdf
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    try:
+        import fitz as pymupdf  # older import name
+        PYMUPDF_AVAILABLE = True
+    except ImportError:
+        PYMUPDF_AVAILABLE = False
+
+# unstructured is optional - document understanding with layout analysis
+try:
+    from unstructured.partition.pdf import partition_pdf
+    UNSTRUCTURED_AVAILABLE = True
+except ImportError:
+    UNSTRUCTURED_AVAILABLE = False
+
 
 class PDFReader:
     """Handles PDF text extraction with positional data."""
@@ -582,6 +600,174 @@ class PDFReader:
             print(f"Warning: {warning_msg}", file=sys.stderr)
             ExtractionWarning.add(warning_msg)
             return ""
+
+    def extract_tables_unstructured(self, page_num: int) -> list[dict]:
+        """Extract tables using unstructured.io - document understanding with layout analysis.
+
+        Unstructured uses advanced document understanding to detect and extract
+        structured content including tables, with good handling of various PDF types.
+
+        Returns same format as extract_tables_with_positions():
+        - 'rows': list of rows, each row is a list of cell dicts with 'text' and 'bbox'
+        - 'bbox': bounding box of entire table
+
+        Args:
+            page_num: 1-indexed page number
+
+        Returns:
+            List of table dicts with position data, or empty list if unstructured unavailable
+        """
+        if not UNSTRUCTURED_AVAILABLE:
+            return []
+
+        try:
+            # Partition the PDF - unstructured processes all pages, we filter by page
+            # Use hi_res strategy for better table detection
+            elements = partition_pdf(
+                filename=str(self.pdf_path),
+                strategy="hi_res",
+                infer_table_structure=True,
+            )
+
+            tables = []
+
+            for element in elements:
+                # Filter for table elements only
+                if element.category != "Table":
+                    continue
+
+                # Filter by page number (unstructured uses 1-indexed page_number in metadata)
+                element_page = getattr(element.metadata, 'page_number', None)
+                if element_page != page_num:
+                    continue
+
+                # Get bounding box if available
+                table_bbox = None
+                coords = getattr(element.metadata, 'coordinates', None)
+                if coords and hasattr(coords, 'points'):
+                    points = coords.points
+                    if points and len(points) >= 4:
+                        # Convert points to (x1, y1, x2, y2) bbox
+                        xs = [p[0] for p in points]
+                        ys = [p[1] for p in points]
+                        table_bbox = (min(xs), min(ys), max(xs), max(ys))
+
+                table_data = {
+                    'bbox': table_bbox,
+                    'rows': []
+                }
+
+                # Try to get table as HTML and parse it
+                table_html = getattr(element.metadata, 'text_as_html', None)
+                if table_html:
+                    # Parse HTML table structure
+                    rows = self._parse_html_table(table_html)
+                    table_data['rows'] = rows
+                else:
+                    # Fallback: use element text, split into rows
+                    text = str(element)
+                    if text:
+                        for line in text.split('\n'):
+                            line = line.strip()
+                            if line:
+                                # Split by multiple spaces (likely column separator)
+                                cells = [c.strip() for c in line.split('  ') if c.strip()]
+                                if cells:
+                                    row_data = [{'text': cell, 'bbox': None} for cell in cells]
+                                    table_data['rows'].append(row_data)
+
+                if table_data['rows']:
+                    tables.append(table_data)
+
+            return tables
+
+        except Exception as e:
+            warning_msg = f"unstructured failed on page {page_num}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
+            return []
+
+    def _parse_html_table(self, html: str) -> list[list[dict]]:
+        """Parse HTML table string into rows of cell dicts."""
+        import re
+        rows = []
+
+        # Find all rows
+        row_matches = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+        for row_html in row_matches:
+            row_data = []
+            # Find all cells (td or th)
+            cell_matches = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.DOTALL | re.IGNORECASE)
+            for cell_html in cell_matches:
+                # Strip HTML tags from cell content
+                cell_text = re.sub(r'<[^>]+>', '', cell_html).strip()
+                row_data.append({'text': cell_text, 'bbox': None})
+            if row_data:
+                rows.append(row_data)
+
+        return rows
+
+    def extract_tables_pymupdf(self, page_num: int) -> list[dict]:
+        """Extract tables using PyMuPDF (fitz) - fast native table detection.
+
+        PyMuPDF has built-in table finding capabilities via find_tables() method.
+        Very fast and handles both bordered and some borderless tables.
+
+        Returns same format as extract_tables_with_positions():
+        - 'rows': list of rows, each row is a list of cell dicts with 'text' and 'bbox'
+        - 'bbox': bounding box of entire table
+
+        Args:
+            page_num: 1-indexed page number
+
+        Returns:
+            List of table dicts with position data, or empty list if PyMuPDF unavailable
+        """
+        if not PYMUPDF_AVAILABLE:
+            return []
+
+        try:
+            doc = pymupdf.open(str(self.pdf_path))
+            # PyMuPDF uses 0-indexed pages
+            page = doc[page_num - 1]
+
+            # Find tables on the page
+            tabs = page.find_tables()
+            tables = []
+
+            for tab in tabs:
+                # Get table bounding box
+                table_bbox = tuple(tab.bbox) if tab.bbox else None
+
+                table_data = {
+                    'bbox': table_bbox,
+                    'rows': []
+                }
+
+                # Extract table content
+                # tab.extract() returns list of rows, each row is list of cell strings
+                for row in tab.extract():
+                    row_data = []
+                    for cell in row:
+                        cell_text = str(cell) if cell is not None else ''
+                        row_data.append({
+                            'text': cell_text.strip(),
+                            'bbox': None
+                        })
+                    if row_data:
+                        table_data['rows'].append(row_data)
+
+                if table_data['rows']:
+                    tables.append(table_data)
+
+            doc.close()
+            return tables
+
+        except Exception as e:
+            warning_msg = f"PyMuPDF failed on page {page_num}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
+            return []
 
 
 def quick_page_count(pdf_path: Path) -> int:

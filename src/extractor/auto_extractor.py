@@ -14,6 +14,8 @@ from .pdf_reader import (
     DOCLING_AVAILABLE,
     IMG2TABLE_AVAILABLE,
     PYMUPDF4LLM_AVAILABLE,
+    PYMUPDF_AVAILABLE,
+    UNSTRUCTURED_AVAILABLE,
 )
 
 console = Console()
@@ -21,7 +23,9 @@ console = Console()
 # Confidence scores for different extraction methods
 CONFIDENCE_DOCLING = 0.98       # High - AI table detection (IBM TableFormer)
 CONFIDENCE_CAMELOT = 1.0        # Highest - traditional table detection
+CONFIDENCE_UNSTRUCTURED = 0.92  # High - document understanding with layout analysis
 CONFIDENCE_PDFPLUMBER = 0.95    # Good - pdfplumber table extraction
+CONFIDENCE_PYMUPDF = 0.93       # Good - fast native table detection
 CONFIDENCE_IMG2TABLE = 0.90     # Good - borderless table specialist
 CONFIDENCE_PYMUPDF4LLM = 0.85   # Good - layout-aware markdown text
 CONFIDENCE_PDFMINER = 0.8       # Fair - layout analysis
@@ -836,13 +840,18 @@ class AutoExtractor:
     """Handles automatic extraction from catalogs using table-aware parsing."""
 
     def __init__(self, pdf_path: Path, session_dir: Path, multi_method: bool = False,
-                 docling_only: bool = False):
+                 docling_only: bool = False, pipeline: bool = False,
+                 unstructured_only: bool = False, pymupdf_only: bool = False):
         self.pdf_path = Path(pdf_path)
         self.session_dir = session_dir
         self.multi_method = multi_method
         self.docling_only = docling_only  # Use only Docling for extraction (testing)
+        self.pipeline = pipeline  # Smart sequential extraction with early stopping
+        self.unstructured_only = unstructured_only  # Use only unstructured.io for extraction
+        self.pymupdf_only = pymupdf_only  # Use only PyMuPDF for extraction
         self.fallback_pages: list[int] = []  # Track pages that needed text fallback (single-method)
         self.empty_pages: list[int] = []  # Track pages with no products found (multi-method)
+        self.pipeline_stats: dict[str, int] = defaultdict(int)  # Track which methods succeeded in pipeline
 
     def run(self, progress_callback=None, show_console=True) -> ExtractionSession:
         """Run automatic extraction on all pages.
@@ -854,15 +863,28 @@ class AutoExtractor:
                          Set to False when running in background.
         """
         if show_console:
-            mode = "[cyan](multi-method)[/cyan] " if self.multi_method else ""
+            if self.pipeline:
+                mode = "[cyan](pipeline)[/cyan] "
+            elif self.multi_method:
+                mode = "[cyan](multi-method)[/cyan] "
+            elif self.docling_only:
+                mode = "[cyan](docling-only)[/cyan] "
+            elif self.unstructured_only:
+                mode = "[cyan](unstructured-only)[/cyan] "
+            elif self.pymupdf_only:
+                mode = "[cyan](pymupdf-only)[/cyan] "
+            else:
+                mode = ""
             console.print(f"[bold blue]Auto-extracting:[/bold blue] {mode}{self.pdf_path.name}")
-            if self.multi_method:
+            if self.multi_method or self.pipeline:
                 # Show availability of optional extractors
                 unavailable = []
                 if not CAMELOT_AVAILABLE:
                     unavailable.append("Camelot")
                 if not DOCLING_AVAILABLE:
                     unavailable.append("Docling")
+                if not UNSTRUCTURED_AVAILABLE:
+                    unavailable.append("unstructured")
                 if not IMG2TABLE_AVAILABLE:
                     unavailable.append("img2table")
                 if not PYMUPDF4LLM_AVAILABLE:
@@ -925,6 +947,11 @@ class AutoExtractor:
                     if len(self.empty_pages) <= 10:
                         console.print(f"[dim]Empty pages: {self.empty_pages}[/dim]")
 
+                if self.pipeline and self.pipeline_stats:
+                    console.print("[cyan]Pipeline method usage:[/cyan]")
+                    for method, count in sorted(self.pipeline_stats.items(), key=lambda x: -x[1]):
+                        console.print(f"  {method}: {count} pages")
+
         return session
 
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
@@ -932,6 +959,18 @@ class AutoExtractor:
         # Use Docling-only mode if enabled (for testing)
         if self.docling_only:
             return self._extract_page_docling_only(reader, page_num)
+
+        # Use unstructured-only mode if enabled
+        if self.unstructured_only:
+            return self._extract_page_unstructured_only(reader, page_num)
+
+        # Use PyMuPDF-only mode if enabled
+        if self.pymupdf_only:
+            return self._extract_page_pymupdf_only(reader, page_num)
+
+        # Use pipeline extraction if enabled (smart sequential with early stop)
+        if self.pipeline:
+            return self._extract_page_pipeline(reader, page_num)
 
         # Use multi-method extraction if enabled
         if self.multi_method:
@@ -981,23 +1020,31 @@ class AutoExtractor:
         camelot_products = self._try_camelot(reader, page_num)
         all_products.append(camelot_products)
 
-        # 3. Try img2table (borderless table specialist)
+        # 3. Try unstructured.io (document understanding)
+        unstructured_products = self._try_unstructured(reader, page_num)
+        all_products.append(unstructured_products)
+
+        # 4. Try PyMuPDF (fast native table detection)
+        pymupdf_products = self._try_pymupdf(reader, page_num)
+        all_products.append(pymupdf_products)
+
+        # 5. Try img2table (borderless table specialist)
         img2table_products = self._try_img2table(reader, page_num)
         all_products.append(img2table_products)
 
-        # 4. Try pdfplumber tables (current method)
+        # 6. Try pdfplumber tables (current method)
         pdfplumber_products = self._try_pdfplumber_tables(reader, page_num)
         all_products.append(pdfplumber_products)
 
-        # 5. Try pymupdf4llm text extraction (layout-aware markdown)
+        # 7. Try pymupdf4llm text extraction (layout-aware markdown)
         pymupdf4llm_products = self._try_pymupdf4llm(reader, page_num)
         all_products.append(pymupdf4llm_products)
 
-        # 6. Try pdfminer.six text layout
+        # 8. Try pdfminer.six text layout
         layout_products = self._try_pdfminer_layout(reader, page_num)
         all_products.append(layout_products)
 
-        # 7. Merge results - pick best confidence per product
+        # 9. Merge results - pick best confidence per product
         merged = self._merge_extractions(*all_products)
 
         # If no products found by any method, track as empty page
@@ -1006,6 +1053,103 @@ class AutoExtractor:
 
         return merged
 
+    def _extract_page_pipeline(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Extract using pipeline: try methods in order, stop when good results found.
+
+        Pipeline order (by confidence, highest first):
+        1. Camelot (1.0) - best for bordered tables
+        2. Docling (0.98) - AI-powered, good for complex tables
+        3. pdfplumber (0.95) - general purpose
+        4. PyMuPDF (0.93) - fast native table detection
+        5. unstructured (0.92) - document understanding
+        6. img2table (0.90) - borderless tables
+        7. pymupdf4llm (0.85) - layout-aware text
+        8. pdfminer (0.80) - text layout analysis
+        9. regex fallback (0.50) - last resort
+
+        Stops early if a method finds products with sufficient confidence.
+        Falls back to merging all results if no single method is good enough.
+        """
+        MIN_PRODUCTS_THRESHOLD = 1  # Minimum products to consider method successful
+        all_results: list[tuple[str, list[Product]]] = []
+
+        # Define pipeline in order of confidence
+        pipeline_methods = [
+            ('camelot', self._try_camelot, CAMELOT_AVAILABLE),
+            ('docling', self._try_docling, DOCLING_AVAILABLE),
+            ('pdfplumber', self._try_pdfplumber_tables, True),
+            ('pymupdf', self._try_pymupdf, PYMUPDF_AVAILABLE),
+            ('unstructured', self._try_unstructured, UNSTRUCTURED_AVAILABLE),
+            ('img2table', self._try_img2table, IMG2TABLE_AVAILABLE),
+            ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
+            ('pdfminer', self._try_pdfminer_layout, True),
+        ]
+
+        best_method = None
+        best_products = []
+
+        for method_name, method_func, is_available in pipeline_methods:
+            if not is_available:
+                continue
+
+            products = method_func(reader, page_num)
+            all_results.append((method_name, products))
+
+            if len(products) >= MIN_PRODUCTS_THRESHOLD:
+                # Calculate average confidence for this result
+                avg_confidence = self._calculate_avg_confidence(products)
+
+                # Accept if we found products with good confidence (>= 0.85)
+                if avg_confidence >= 0.85:
+                    best_method = method_name
+                    best_products = products
+                    break
+
+                # Keep track of best so far even if not good enough to stop
+                if len(products) > len(best_products):
+                    best_method = method_name
+                    best_products = products
+
+        # If we have a clear winner, use it
+        if best_products and best_method:
+            self.pipeline_stats[best_method] += 1
+            return best_products
+
+        # No single method was good enough - try merging all results
+        if all_results:
+            all_product_lists = [products for _, products in all_results if products]
+            if all_product_lists:
+                merged = self._merge_extractions(*all_product_lists)
+                if merged:
+                    self.pipeline_stats['merged'] += 1
+                    return merged
+
+        # Last resort: regex fallback on raw text
+        page_content = reader.get_page(page_num)
+        fallback_products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+        if fallback_products:
+            self.pipeline_stats['regex_fallback'] += 1
+            return fallback_products
+
+        # Nothing found
+        self.empty_pages.append(page_num)
+        return []
+
+    def _calculate_avg_confidence(self, products: list[Product]) -> float:
+        """Calculate average confidence across all products and fields."""
+        if not products:
+            return 0.0
+
+        total_confidence = 0.0
+        count = 0
+
+        for product in products:
+            for location in product.field_locations.values():
+                total_confidence += location.confidence
+                count += 1
+
+        return total_confidence / count if count > 0 else 0.0
+
     def _extract_page_docling_only(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract using only Docling (for testing)."""
         if not DOCLING_AVAILABLE:
@@ -1013,6 +1157,32 @@ class AutoExtractor:
             return []
 
         products = self._try_docling(reader, page_num)
+
+        if not products:
+            self.empty_pages.append(page_num)
+
+        return products
+
+    def _extract_page_unstructured_only(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Extract using only unstructured.io."""
+        if not UNSTRUCTURED_AVAILABLE:
+            console.print("[red]unstructured not available! Install with: pip install unstructured[pdf][/red]")
+            return []
+
+        products = self._try_unstructured(reader, page_num)
+
+        if not products:
+            self.empty_pages.append(page_num)
+
+        return products
+
+    def _extract_page_pymupdf_only(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Extract using only PyMuPDF."""
+        if not PYMUPDF_AVAILABLE:
+            console.print("[red]PyMuPDF not available! Install with: pip install pymupdf[/red]")
+            return []
+
+        products = self._try_pymupdf(reader, page_num)
 
         if not products:
             self.empty_pages.append(page_num)
@@ -1055,6 +1225,46 @@ class AutoExtractor:
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_CAMELOT
+            products.extend(extracted)
+
+        return products
+
+    def _try_unstructured(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using unstructured.io - document understanding with layout analysis."""
+        if not UNSTRUCTURED_AVAILABLE:
+            return []
+
+        tables = reader.extract_tables_unstructured(page_num)
+        products = []
+
+        for table_data in tables:
+            extracted = extract_products_from_table(
+                table_data['rows'], page_num, self.pdf_path.name
+            )
+            # Update confidence to unstructured level
+            for product in extracted:
+                for field_name, location in product.field_locations.items():
+                    location.confidence = CONFIDENCE_UNSTRUCTURED
+            products.extend(extracted)
+
+        return products
+
+    def _try_pymupdf(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try extraction using PyMuPDF - fast native table detection."""
+        if not PYMUPDF_AVAILABLE:
+            return []
+
+        tables = reader.extract_tables_pymupdf(page_num)
+        products = []
+
+        for table_data in tables:
+            extracted = extract_products_from_table(
+                table_data['rows'], page_num, self.pdf_path.name
+            )
+            # Update confidence to PyMuPDF level
+            for product in extracted:
+                for field_name, location in product.field_locations.items():
+                    location.confidence = CONFIDENCE_PYMUPDF
             products.extend(extracted)
 
         return products

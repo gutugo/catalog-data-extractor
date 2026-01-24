@@ -392,6 +392,12 @@ def start_extraction(catalog_name: str):
     if not catalog_name:
         return jsonify({'error': 'Invalid catalog name'}), 400
 
+    # Parse extraction method from request body
+    data = request.get_json(silent=True) or {}
+    method = data.get('method', 'standard')
+    if method not in ('standard', 'pipeline', 'multi_method', 'docling_only', 'unstructured_only', 'pymupdf_only'):
+        return jsonify({'error': 'Invalid extraction method'}), 400
+
     # Find the PDF first (before acquiring lock)
     pdf_path = CATALOGS_DIR / f"{catalog_name}.pdf"
     if not pdf_path.exists():
@@ -409,6 +415,7 @@ def start_extraction(catalog_name: str):
             'status': 'extracting',
             'progress': {'page': 0, 'total_pages': 0, 'products': 0},
             'error': None,
+            'method': method,
         }
 
     def progress_callback(page_num, total_pages, products_count):
@@ -424,7 +431,18 @@ def start_extraction(catalog_name: str):
             from .auto_extractor import AutoExtractor
 
             SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-            extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
+            # Configure extractor based on selected method
+            multi_method = (method == 'multi_method')
+            docling_only = (method == 'docling_only')
+            pipeline = (method == 'pipeline')
+            unstructured_only = (method == 'unstructured_only')
+            pymupdf_only = (method == 'pymupdf_only')
+            extractor = AutoExtractor(pdf_path, SESSIONS_DIR,
+                                       multi_method=multi_method,
+                                       docling_only=docling_only,
+                                       pipeline=pipeline,
+                                       unstructured_only=unstructured_only,
+                                       pymupdf_only=pymupdf_only)
             session = extractor.run(progress_callback=progress_callback, show_console=False)
 
             import time as _time
@@ -450,6 +468,7 @@ def start_extraction(catalog_name: str):
         'success': True,
         'message': 'Extraction started',
         'catalog': catalog_name,
+        'method': method,
     })
 
 
