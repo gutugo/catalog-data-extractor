@@ -384,7 +384,11 @@ def upload_catalog():
 
 @app.route('/api/extract/<catalog_name>', methods=['POST'])
 def start_extraction(catalog_name: str):
-    """Start auto-extraction for a catalog."""
+    """Start auto-extraction for a catalog.
+
+    Uses smart pipeline extraction that automatically selects the best
+    extraction methods based on PDF characteristics.
+    """
     csrf_error = _check_csrf()
     if csrf_error:
         return jsonify(csrf_error[0]), csrf_error[1]
@@ -393,12 +397,6 @@ def start_extraction(catalog_name: str):
     catalog_name = _validate_catalog_name(catalog_name)
     if not catalog_name:
         return jsonify({'error': 'Invalid catalog name'}), 400
-
-    # Parse extraction method from request body
-    data = request.get_json(silent=True) or {}
-    method = data.get('method', 'standard')
-    if method not in ('standard', 'pipeline', 'multi_method', 'docling_only', 'unstructured_only', 'pymupdf_only'):
-        return jsonify({'error': 'Invalid extraction method'}), 400
 
     # Find the PDF first (before acquiring lock)
     pdf_path = CATALOGS_DIR / f"{catalog_name}.pdf"
@@ -417,7 +415,6 @@ def start_extraction(catalog_name: str):
             'status': 'extracting',
             'progress': {'page': 0, 'total_pages': 0, 'products': 0},
             'error': None,
-            'method': method,
         }
 
     def progress_callback(page_num, total_pages, products_count):
@@ -433,18 +430,7 @@ def start_extraction(catalog_name: str):
             from .auto_extractor import AutoExtractor
 
             SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-            # Configure extractor based on selected method
-            multi_method = (method == 'multi_method')
-            docling_only = (method == 'docling_only')
-            pipeline = (method == 'pipeline')
-            unstructured_only = (method == 'unstructured_only')
-            pymupdf_only = (method == 'pymupdf_only')
-            extractor = AutoExtractor(pdf_path, SESSIONS_DIR,
-                                       multi_method=multi_method,
-                                       docling_only=docling_only,
-                                       pipeline=pipeline,
-                                       unstructured_only=unstructured_only,
-                                       pymupdf_only=pymupdf_only)
+            extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
             session = extractor.run(progress_callback=progress_callback, show_console=False)
 
             import time as _time
@@ -470,7 +456,6 @@ def start_extraction(catalog_name: str):
         'success': True,
         'message': 'Extraction started',
         'catalog': catalog_name,
-        'method': method,
     })
 
 

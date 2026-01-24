@@ -270,20 +270,20 @@ def auto(
         dir_okay=False,
         resolve_path=True,
     ),
-    multi_method: bool = typer.Option(
-        False,
-        "--multi", "-m",
-        help="Use multiple extraction methods for best accuracy (slower, requires ghostscript for Camelot)",
-    ),
 ) -> None:
-    """Auto-extract products from a PDF catalog."""
+    """Auto-extract products from a PDF catalog.
+
+    Uses smart pipeline extraction that automatically selects the best
+    extraction methods based on PDF characteristics (bordered tables,
+    borderless tables, scanned documents, etc.).
+    """
     ensure_directories()
 
     if not pdf_path.suffix.lower() == ".pdf":
         console.print(f"[red]Error:[/red] {pdf_path} is not a PDF file")
         raise typer.Exit(1)
 
-    extractor = AutoExtractor(pdf_path, SESSIONS_DIR, multi_method=multi_method)
+    extractor = AutoExtractor(pdf_path, SESSIONS_DIR)
     session = extractor.run()
 
     display_extraction_summary(session)

@@ -2,13 +2,13 @@
 
 ## Project Overview
 
-Catalog Data Extractor - Extracts product data from PDF supplier catalogs using multiple extraction methods with a web-based verification UI.
+Catalog Data Extractor - Extracts product data from PDF supplier catalogs using smart automatic extraction with a web-based verification UI.
 
 ## Key Directories
 
 ```
 src/extractor/
-  auto_extractor.py     # Multi-method extraction orchestration
+  auto_extractor.py     # Smart pipeline extraction
   pdf_reader.py         # PDF reading and table extraction methods
   web_verifier.py       # Flask web UI (port 5001)
   data_model.py         # Product/Session data models
@@ -20,63 +20,62 @@ processed/
   extractions/          # Output CSV files
 ```
 
-## Extraction Methods
+## Extraction
 
-9 extraction methods available, ordered by confidence score:
+The extractor automatically classifies PDFs and selects the best extraction methods based on document characteristics. No user configuration needed.
 
-| Method | Confidence | Library | Best For |
-|--------|------------|---------|----------|
-| Camelot | 1.0 | camelot-py | Bordered tables (requires ghostscript) |
-| Docling | 0.98 | docling | Complex/bordered tables, scanned docs (IBM AI) |
-| pdfplumber | 0.95 | pdfplumber | General tables (default) |
-| PyMuPDF | 0.93 | pymupdf | Fast native table detection |
-| Unstructured | 0.92 | unstructured | Document understanding, varied layouts |
-| img2table | 0.90 | img2table | Borderless tables |
-| pymupdf4llm | 0.85 | pymupdf4llm | Layout-aware markdown text |
-| pdfminer | 0.80 | pdfminer.six | Text layout analysis |
-| Regex | 0.50 | built-in | Text pattern fallback |
+### How It Works
 
-**Note:** Confidence scores are estimates. Actual accuracy depends on PDF structure - benchmark on your catalogs and adjust as needed.
+1. **PDF Classification** - Analyzes the PDF to detect:
+   - `has_text`: Whether extractable text is present
+   - `has_borders`: Whether tables have visible borders
+   - `is_scanned`: Whether the PDF is scanned/image-based
+   - `layout_type`: 'tabular', 'borderless', 'text-only', or 'mixed'
 
-### Extraction Modes
+2. **Smart Method Selection** - Based on classification:
+
+| PDF Type | Methods Used |
+|----------|--------------|
+| Digital + Bordered | Camelot → pdfplumber → PyMuPDF → pdfminer |
+| Digital + Borderless | img2table → pdfplumber → Docling → pymupdf4llm |
+| Scanned | Docling → unstructured |
+| Text-only | pymupdf4llm → pdfminer |
+
+3. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
+
+4. **Fallback** - Merges results from all methods if no single method is sufficient, then tries regex as last resort
+
+### Available Methods (by confidence)
+
+| Method | Confidence | Best For |
+|--------|------------|----------|
+| Camelot | 1.0 | Bordered tables (requires ghostscript) |
+| Docling | 0.98 | Complex tables, scanned docs (IBM AI) |
+| pdfplumber | 0.95 | General tables |
+| PyMuPDF | 0.93 | Fast native table detection |
+| Unstructured | 0.92 | Varied document layouts |
+| img2table | 0.90 | Borderless tables |
+| pymupdf4llm | 0.85 | Layout-aware markdown text |
+| pdfminer | 0.80 | Text layout analysis |
+| Regex | 0.50 | Text pattern fallback |
+
+### Usage
 
 ```python
-# Standard (default) - pdfplumber tables → regex fallback
-AutoExtractor(pdf_path, session_dir)
+from extractor.auto_extractor import AutoExtractor
 
-# Pipeline - tries methods in order of confidence, stops when good results found
-AutoExtractor(pdf_path, session_dir, pipeline=True)
-
-# Multi-method - all 9 methods, merge by confidence
-AutoExtractor(pdf_path, session_dir, multi_method=True)
-
-# Single-method modes for testing
-AutoExtractor(pdf_path, session_dir, docling_only=True)
-AutoExtractor(pdf_path, session_dir, unstructured_only=True)
-AutoExtractor(pdf_path, session_dir, pymupdf_only=True)
+extractor = AutoExtractor(pdf_path, session_dir)
+session = extractor.run()
 ```
 
 ## Web UI
-
-### Method Selector
-
-The web UI includes a dropdown to select extraction method before uploading/extracting:
-
-| Option | Description |
-|--------|-------------|
-| **Standard (pdfplumber)** | Default. General table extraction with regex fallback. |
-| **Pipeline (smart)** | Tries methods in order of confidence, stops when good results found. Best balance of speed and accuracy. |
-| **Multi-method (all)** | Runs all 9 methods and merges results by confidence. Most thorough but slower. |
-| **Docling AI** | IBM AI-powered table detection using TableFormer. |
-| **Unstructured.io** | Document understanding with hi-res strategy. |
-| **PyMuPDF** | Fast native table detection. |
 
 ### Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/catalogs` | List all catalogs with status |
-| POST | `/api/extract/<name>` | Start extraction (accepts `method` in JSON body) |
+| POST | `/api/extract/<name>` | Start extraction |
 | GET | `/api/extract/<name>/status` | Check extraction progress |
 | POST | `/api/switch/<name>` | Switch active catalog |
 | GET | `/api/page/<num>` | Get page products |
@@ -90,32 +89,24 @@ All POST endpoints require `X-CSRF-Token` header.
 ### Extract API Example
 
 ```javascript
-// Start extraction with specific method
 fetch('/api/extract/catalog-name', {
     method: 'POST',
     headers: {
         'X-CSRF-Token': csrfToken,
         'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ method: 'pipeline' })  // or 'standard', 'multi_method', etc.
+    body: JSON.stringify({})
 });
 ```
 
-## Pipeline Mode
+## Column Detection
 
-The pipeline tries extraction methods in order of confidence and stops early when good results are found:
+Uses multi-signal approach for robust column mapping:
 
-1. **Camelot** (1.0) - bordered tables
-2. **Docling** (0.98) - AI-powered
-3. **pdfplumber** (0.95) - general purpose
-4. **PyMuPDF** (0.93) - fast native
-5. **Unstructured** (0.92) - document understanding
-6. **img2table** (0.90) - borderless tables
-7. **pymupdf4llm** (0.85) - layout-aware text
-8. **pdfminer** (0.80) - text layout
-9. **Regex fallback** (0.50) - last resort
-
-Stops when a method finds products with confidence >= 0.85. Falls back to merging all results if no single method is sufficient.
+1. **Header patterns** - Matches column headers ("Item #", "Description", etc.)
+2. **Content patterns** - Detects item_no, price, count patterns in cell data
+3. **Column width heuristics** - Narrow columns often contain codes, wide columns contain descriptions
+4. **Cross-row consistency** - Same pattern across multiple rows indicates field type
 
 ## Docling (IBM AI Extraction)
 
@@ -139,8 +130,6 @@ uv run extractor web-verify --port 5001
 
 # CLI extraction
 uv run extractor auto catalogs/file.pdf
-uv run extractor auto catalogs/file.pdf --multi-method
-uv run extractor auto catalogs/file.pdf --pipeline
 
 # Check extraction status
 uv run extractor status
@@ -154,7 +143,7 @@ uv run extractor export catalog-name
 **Core (always available):**
 - pdfplumber, pdfminer.six, flask, rich, typer, pandas
 
-**Optional (for multi-method/pipeline):**
+**Optional (for better accuracy):**
 - camelot-py (requires system ghostscript)
 - docling (downloads ~500MB AI models)
 - unstructured[pdf] (document understanding)
@@ -176,9 +165,9 @@ du -sh ~/.cache/huggingface/hub/models--docling-project*
 ```
 
 ### Empty extractions
-Try different extraction mode - Pipeline mode is recommended:
+Check available methods - some require optional dependencies:
 ```bash
-uv run extractor auto catalogs/file.pdf --pipeline
+uv run python -c "from extractor.pdf_reader import *; print('Docling:', DOCLING_AVAILABLE); print('Camelot:', CAMELOT_AVAILABLE)"
 ```
 
 ### Re-extract a catalog
@@ -195,4 +184,4 @@ uv run extractor web-verify --port 5002
 ## Git Branches
 
 - `main` - Stable release
-- `feature/multi-method-extraction` - New extraction methods
+- `feature/multi-method-extraction` - Development branch

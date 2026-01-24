@@ -310,6 +310,184 @@ def detect_column_mapping(table: list[list]) -> dict[str, int]:
     return mapping
 
 
+# Patterns for robust column detection (content-based)
+PRICE_PATTERN = re.compile(r'^\$[\d,]+\.?\d*$')
+NUMERIC_ONLY_PATTERN = re.compile(r'^[\d,]+$')
+
+
+def detect_columns_robust(table: list[list], sample_size: int = 10) -> dict[str, int]:
+    """Detect column types using multi-signal approach.
+
+    Uses multiple signals instead of just header matching:
+    1. Header text patterns (existing approach)
+    2. Content pattern matching - detect item_no, price, count patterns
+    3. Column width heuristics - narrow=code, wide=description
+    4. Cross-row consistency - same pattern across rows
+
+    Args:
+        table: List of rows (each row is a list of cells)
+        sample_size: Number of data rows to sample for pattern detection
+
+    Returns:
+        Dict mapping field names to column indices
+    """
+    if not table:
+        return {}
+
+    # First try header-based detection
+    header_mapping = detect_column_mapping(table)
+
+    # Get number of columns
+    num_cols = max(len(row) for row in table) if table else 0
+    if num_cols == 0:
+        return header_mapping
+
+    # Score columns by content patterns
+    col_scores: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    col_widths: dict[int, list[int]] = defaultdict(list)
+
+    # Skip header rows, sample data rows
+    data_rows = []
+    for row in table:
+        row_strings = [_get_cell_text(cell) if not isinstance(cell, str) else cell for cell in row]
+        if not is_header_row(row_strings):
+            data_rows.append(row)
+        if len(data_rows) >= sample_size:
+            break
+
+    for row in data_rows:
+        for col_idx in range(min(len(row), num_cols)):
+            cell = row[col_idx]
+            text = _get_cell_text(cell) if not isinstance(cell, str) else cell
+            text = text.strip() if text else ''
+
+            if not text:
+                continue
+
+            # Track column widths
+            col_widths[col_idx].append(len(text))
+
+            # Score by content patterns
+            # Item number patterns
+            if ITEM_NO_PATTERN.match(text):
+                col_scores[col_idx]['item_no'] += 1.0
+
+            # Price patterns ($xx.xx)
+            if PRICE_PATTERN.match(text):
+                col_scores[col_idx]['price'] += 1.0
+
+            # Count/UOM patterns (32 ct., 100 pk)
+            if COUNT_UOM_PATTERN.match(text) or COUNT_COLUMN_PATTERN.match(text):
+                col_scores[col_idx]['count'] += 1.0
+
+            # Product name heuristics: longer text, mixed case, no special patterns
+            if len(text) > 15 and not ITEM_NO_PATTERN.match(text) and not PRICE_PATTERN.match(text):
+                col_scores[col_idx]['product_name'] += 0.5
+
+            # Short alphanumeric codes (potential SKU/UPC)
+            if len(text) <= 15 and text.isalnum() and any(c.isdigit() for c in text):
+                if len(text) >= 10:  # UPC-like (10+ digits)
+                    col_scores[col_idx]['upc'] += 0.8
+                elif len(text) >= 4:  # SKU-like
+                    col_scores[col_idx]['sku'] += 0.5
+
+    # Calculate average column widths
+    avg_widths = {}
+    for col_idx, widths in col_widths.items():
+        avg_widths[col_idx] = sum(widths) / len(widths) if widths else 0
+
+    # Boost product_name score for wide columns
+    if avg_widths:
+        max_width = max(avg_widths.values())
+        for col_idx, width in avg_widths.items():
+            if width > max_width * 0.6:  # Column is relatively wide
+                col_scores[col_idx]['product_name'] += 0.5
+
+    # Assign columns by highest score, avoiding duplicates
+    result = dict(header_mapping)  # Start with header-based mapping
+    assigned_cols = set(result.values())
+
+    # For each field type, find best unassigned column
+    field_priority = ['item_no', 'upc', 'sku', 'product_name', 'count', 'price']
+
+    for field_name in field_priority:
+        if field_name in result:
+            continue
+
+        best_col = -1
+        best_score = 0.0
+
+        for col_idx in range(num_cols):
+            if col_idx in assigned_cols:
+                continue
+            score = col_scores[col_idx].get(field_name, 0)
+            if score > best_score:
+                best_score = score
+                best_col = col_idx
+
+        # Require minimum score threshold
+        if best_col >= 0 and best_score >= 0.5:
+            result[field_name] = best_col
+            assigned_cols.add(best_col)
+
+    return result
+
+
+def parse_markdown_tables(text: str) -> list[list[list[str]]]:
+    """Parse markdown tables from pymupdf4llm output.
+
+    Detects tables formatted with | separators:
+    | Header 1 | Header 2 |
+    |----------|----------|
+    | Cell 1   | Cell 2   |
+
+    Args:
+        text: Markdown text potentially containing tables
+
+    Returns:
+        List of tables, each table is a list of rows, each row is a list of cell strings
+    """
+    tables: list[list[list[str]]] = []
+    current_table: list[list[str]] = []
+    in_table = False
+
+    for line in text.split('\n'):
+        line = line.strip()
+
+        # Check if line looks like a table row
+        if '|' in line:
+            # Skip separator rows (|---|---|)
+            if re.match(r'^\|[\s\-:]+\|$', line) or re.match(r'^\|(\s*[-:]+\s*\|)+$', line):
+                in_table = True
+                continue
+
+            # Parse cells between pipes
+            # Handle both | cell | cell | and cell | cell formats
+            if line.startswith('|'):
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+            else:
+                cells = [c.strip() for c in line.split('|')]
+
+            # Filter out empty rows
+            if cells and any(c for c in cells):
+                current_table.append(cells)
+                in_table = True
+        else:
+            # Non-table line - end current table if we were in one
+            if in_table and current_table:
+                # Only keep tables with at least 2 rows (header + data)
+                if len(current_table) >= 2:
+                    tables.append(current_table)
+                current_table = []
+                in_table = False
+
+    # Don't forget the last table
+    if current_table and len(current_table) >= 2:
+        tables.append(current_table)
+
+    return tables
+
+
 def _get_cell_text(cell) -> str:
     """Get text from a cell, handling both string and dict formats."""
     if isinstance(cell, dict):
@@ -401,7 +579,8 @@ def _get_cell_bbox(cell) -> tuple | None:
     return None
 
 
-def extract_products_from_table(table: list[list], page_number: int, source_file: str) -> list[Product]:
+def extract_products_from_table(table: list[list], page_number: int, source_file: str,
+                                 use_robust_detection: bool = True) -> list[Product]:
     """Extract products from a single table.
 
     Supports multiple column formats:
@@ -409,13 +588,23 @@ def extract_products_from_table(table: list[list], page_number: int, source_file
     - UPC | SKU | Description | Size | Price
     - And other variations
 
-    Uses header detection to map columns, falls back to position-based detection.
+    Uses header detection to map columns, with optional robust content-based
+    detection as fallback.
     Works with both string lists and dict lists (with 'text' and 'bbox' keys).
+
+    Args:
+        table: List of rows (each row is a list of cells)
+        page_number: Page number for product location
+        source_file: Source PDF filename
+        use_robust_detection: Use multi-signal column detection (default True)
     """
     products = []
 
-    # Detect column mapping from headers
-    col_mapping = detect_column_mapping(table)
+    # Detect column mapping - use robust detection if enabled
+    if use_robust_detection:
+        col_mapping = detect_columns_robust(table)
+    else:
+        col_mapping = detect_column_mapping(table)
 
     # Determine which column contains count data (fallback detection)
     count_col = col_mapping.get('count', -1)
@@ -840,21 +1029,18 @@ def extract_products_from_text_fallback(page: PageContent, source_file: str) -> 
 
 
 class AutoExtractor:
-    """Handles automatic extraction from catalogs using table-aware parsing."""
+    """Handles automatic extraction from catalogs using smart pipeline.
 
-    def __init__(self, pdf_path: Path, session_dir: Path, multi_method: bool = False,
-                 docling_only: bool = False, pipeline: bool = False,
-                 unstructured_only: bool = False, pymupdf_only: bool = False):
+    The extractor automatically classifies the PDF and selects the best
+    extraction methods based on document characteristics (bordered tables,
+    borderless tables, scanned documents, etc.).
+    """
+
+    def __init__(self, pdf_path: Path, session_dir: Path):
         self.pdf_path = Path(pdf_path)
         self.session_dir = session_dir
-        self.multi_method = multi_method
-        self.docling_only = docling_only  # Use only Docling for extraction (testing)
-        self.pipeline = pipeline  # Smart sequential extraction with early stopping
-        self.unstructured_only = unstructured_only  # Use only unstructured.io for extraction
-        self.pymupdf_only = pymupdf_only  # Use only PyMuPDF for extraction
-        self.fallback_pages: list[int] = []  # Track pages that needed text fallback (single-method)
-        self.empty_pages: list[int] = []  # Track pages with no products found (multi-method)
-        self.pipeline_stats: dict[str, int] = defaultdict(int)  # Track which methods succeeded in pipeline
+        self.empty_pages: list[int] = []  # Track pages with no products found
+        self.pipeline_stats: dict[str, int] = defaultdict(int)  # Track which methods succeeded
 
     def run(self, progress_callback=None, show_console=True) -> ExtractionSession:
         """Run automatic extraction on all pages.
@@ -866,34 +1052,21 @@ class AutoExtractor:
                          Set to False when running in background.
         """
         if show_console:
-            if self.pipeline:
-                mode = "[cyan](pipeline)[/cyan] "
-            elif self.multi_method:
-                mode = "[cyan](multi-method)[/cyan] "
-            elif self.docling_only:
-                mode = "[cyan](docling-only)[/cyan] "
-            elif self.unstructured_only:
-                mode = "[cyan](unstructured-only)[/cyan] "
-            elif self.pymupdf_only:
-                mode = "[cyan](pymupdf-only)[/cyan] "
-            else:
-                mode = ""
-            console.print(f"[bold blue]Auto-extracting:[/bold blue] {mode}{self.pdf_path.name}")
-            if self.multi_method or self.pipeline:
-                # Show availability of optional extractors
-                unavailable = []
-                if not CAMELOT_AVAILABLE:
-                    unavailable.append("Camelot")
-                if not DOCLING_AVAILABLE:
-                    unavailable.append("Docling")
-                if not UNSTRUCTURED_AVAILABLE:
-                    unavailable.append("unstructured")
-                if not IMG2TABLE_AVAILABLE:
-                    unavailable.append("img2table")
-                if not PYMUPDF4LLM_AVAILABLE:
-                    unavailable.append("pymupdf4llm")
-                if unavailable:
-                    console.print(f"[yellow]Note: {', '.join(unavailable)} not available[/yellow]")
+            console.print(f"[bold blue]Auto-extracting:[/bold blue] {self.pdf_path.name}")
+            # Show availability of optional extractors
+            unavailable = []
+            if not CAMELOT_AVAILABLE:
+                unavailable.append("Camelot")
+            if not DOCLING_AVAILABLE:
+                unavailable.append("Docling")
+            if not UNSTRUCTURED_AVAILABLE:
+                unavailable.append("unstructured")
+            if not IMG2TABLE_AVAILABLE:
+                unavailable.append("img2table")
+            if not PYMUPDF4LLM_AVAILABLE:
+                unavailable.append("pymupdf4llm")
+            if unavailable:
+                console.print(f"[yellow]Note: {', '.join(unavailable)} not available[/yellow]")
 
         with PDFReader(self.pdf_path) as reader:
             session = ExtractionSession(
@@ -901,6 +1074,18 @@ class AutoExtractor:
                 total_pages=reader.total_pages,
                 current_page=1,
             )
+
+            # Classify PDF and show info
+            if show_console:
+                pdf_info = reader.classify_pdf()
+                layout_desc = {
+                    'tabular': 'bordered tables',
+                    'borderless': 'borderless tables',
+                    'text-only': 'text-only layout',
+                    'mixed': 'mixed layout',
+                }.get(pdf_info['layout_type'], 'unknown')
+                scanned_note = " (scanned)" if pdf_info['is_scanned'] else ""
+                console.print(f"[dim]PDF classification: {layout_desc}{scanned_note}[/dim]")
 
             if show_console:
                 with Progress(
@@ -940,135 +1125,33 @@ class AutoExtractor:
             if show_console:
                 console.print(f"[green]Extracted {len(session.products)} products from {reader.total_pages} pages[/green]")
 
-                if self.fallback_pages:
-                    console.print(f"[yellow]Note: {len(self.fallback_pages)} pages used text fallback (no tables found)[/yellow]")
-                    if len(self.fallback_pages) <= 10:
-                        console.print(f"[dim]Fallback pages: {self.fallback_pages}[/dim]")
-
                 if self.empty_pages:
                     console.print(f"[yellow]Note: {len(self.empty_pages)} pages had no products extracted[/yellow]")
                     if len(self.empty_pages) <= 10:
                         console.print(f"[dim]Empty pages: {self.empty_pages}[/dim]")
 
-                if self.pipeline and self.pipeline_stats:
-                    console.print("[cyan]Pipeline method usage:[/cyan]")
+                if self.pipeline_stats:
+                    console.print("[cyan]Extraction method usage:[/cyan]")
                     for method, count in sorted(self.pipeline_stats.items(), key=lambda x: -x[1]):
                         console.print(f"  {method}: {count} pages")
 
         return session
 
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Extract products from a single page, preferring table extraction."""
-        # Use Docling-only mode if enabled (for testing)
-        if self.docling_only:
-            return self._extract_page_docling_only(reader, page_num)
+        """Extract products from a single page using smart pipeline.
 
-        # Use unstructured-only mode if enabled
-        if self.unstructured_only:
-            return self._extract_page_unstructured_only(reader, page_num)
-
-        # Use PyMuPDF-only mode if enabled
-        if self.pymupdf_only:
-            return self._extract_page_pymupdf_only(reader, page_num)
-
-        # Use pipeline extraction if enabled (smart sequential with early stop)
-        if self.pipeline:
-            return self._extract_page_pipeline(reader, page_num)
-
-        # Use multi-method extraction if enabled
-        if self.multi_method:
-            return self._extract_page_multi(reader, page_num)
-
-        # Try table extraction with positions first
-        tables_with_positions = reader.extract_tables_with_positions(page_num)
-        table_products = []
-
-        if tables_with_positions:
-            for table_data in tables_with_positions:
-                # Convert to row format expected by extract_products_from_table
-                table_products.extend(extract_products_from_table(
-                    table_data['rows'], page_num, self.pdf_path.name
-                ))
-
-        # Also try text extraction
-        page_content = reader.get_page(page_num)
-        text_products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
-
-        # Compare results: prefer extraction with combined identifiers (has " / ")
-        # This handles cases where pdfplumber misses columns like UPC
-        table_combined = sum(1 for p in table_products if ' / ' in p.item_no)
-        text_combined = sum(1 for p in text_products if ' / ' in p.item_no)
-
-        if text_combined > table_combined and text_products:
-            # Text extraction has more complete identifiers
-            self.fallback_pages.append(page_num)
-            return text_products
-        elif table_products:
-            return table_products
-        elif text_products:
-            self.fallback_pages.append(page_num)
-            return text_products
-
-        return []
-
-    def _extract_page_multi(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Extract using multiple methods and merge best results."""
-        all_products = []
-
-        # 1. Try Docling (IBM) - best AI-powered table detection
-        docling_products = self._try_docling(reader, page_num)
-        all_products.append(docling_products)
-
-        # 2. Try Camelot (traditional high-accuracy table extraction)
-        camelot_products = self._try_camelot(reader, page_num)
-        all_products.append(camelot_products)
-
-        # 3. Try unstructured.io (document understanding)
-        unstructured_products = self._try_unstructured(reader, page_num)
-        all_products.append(unstructured_products)
-
-        # 4. Try PyMuPDF (fast native table detection)
-        pymupdf_products = self._try_pymupdf(reader, page_num)
-        all_products.append(pymupdf_products)
-
-        # 5. Try img2table (borderless table specialist)
-        img2table_products = self._try_img2table(reader, page_num)
-        all_products.append(img2table_products)
-
-        # 6. Try pdfplumber tables (current method)
-        pdfplumber_products = self._try_pdfplumber_tables(reader, page_num)
-        all_products.append(pdfplumber_products)
-
-        # 7. Try pymupdf4llm text extraction (layout-aware markdown)
-        pymupdf4llm_products = self._try_pymupdf4llm(reader, page_num)
-        all_products.append(pymupdf4llm_products)
-
-        # 8. Try pdfminer.six text layout
-        layout_products = self._try_pdfminer_layout(reader, page_num)
-        all_products.append(layout_products)
-
-        # 9. Merge results - pick best confidence per product
-        merged = self._merge_extractions(*all_products)
-
-        # If no products found by any method, track as empty page
-        if not merged:
-            self.empty_pages.append(page_num)
-
-        return merged
+        Automatically selects best extraction methods based on PDF classification.
+        """
+        return self._extract_page_pipeline(reader, page_num)
 
     def _extract_page_pipeline(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract using pipeline: try methods in order, stop when good results found.
 
-        Pipeline order (by confidence, highest first):
-        1. Camelot (1.0) - best for bordered tables
-        2. Docling (0.98) - AI-powered, good for complex tables
-        3. pdfplumber (0.95) - general purpose
-        4. PyMuPDF (0.93) - fast native table detection
-        5. unstructured (0.92) - document understanding
-        6. img2table (0.90) - borderless tables
-        7. pymupdf4llm (0.85) - layout-aware text
-        8. pdfminer (0.80) - text layout analysis
-        9. regex fallback (0.50) - last resort
+        Uses PDF classification to select optimal method order:
+        - Digital + Bordered: Camelot → pdfplumber → PyMuPDF → pdfminer → regex
+        - Digital + Borderless: img2table → pdfplumber → Docling → pymupdf4llm → regex
+        - Scanned: Docling → unstructured
+        - Text-only: pymupdf4llm → pdfminer → regex
 
         Stops early if a method finds products with sufficient confidence.
         Falls back to merging all results if no single method is good enough.
@@ -1076,17 +1159,50 @@ class AutoExtractor:
         MIN_PRODUCTS_THRESHOLD = 1  # Minimum products to consider method successful
         all_results: list[tuple[str, list[Product]]] = []
 
-        # Define pipeline in order of confidence
-        pipeline_methods = [
-            ('camelot', self._try_camelot, CAMELOT_AVAILABLE),
-            ('docling', self._try_docling, DOCLING_AVAILABLE),
-            ('pdfplumber', self._try_pdfplumber_tables, True),
-            ('pymupdf', self._try_pymupdf, PYMUPDF_AVAILABLE),
-            ('unstructured', self._try_unstructured, UNSTRUCTURED_AVAILABLE),
-            ('img2table', self._try_img2table, IMG2TABLE_AVAILABLE),
-            ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
-            ('pdfminer', self._try_pdfminer_layout, True),
-        ]
+        # Get PDF classification for smart method selection
+        pdf_info = reader.classify_pdf()
+
+        # Select pipeline order based on PDF characteristics
+        if pdf_info['is_scanned']:
+            # Scanned documents - use AI/vision methods
+            pipeline_methods = [
+                ('docling', self._try_docling, DOCLING_AVAILABLE),
+                ('unstructured', self._try_unstructured, UNSTRUCTURED_AVAILABLE),
+            ]
+        elif pdf_info['has_borders']:
+            # Digital PDF with bordered tables
+            pipeline_methods = [
+                ('camelot', self._try_camelot, CAMELOT_AVAILABLE),
+                ('pdfplumber', self._try_pdfplumber_tables, True),
+                ('pymupdf', self._try_pymupdf, PYMUPDF_AVAILABLE),
+                ('pdfminer', self._try_pdfminer_layout, True),
+            ]
+        elif pdf_info['layout_type'] == 'borderless':
+            # Borderless tables
+            pipeline_methods = [
+                ('img2table', self._try_img2table, IMG2TABLE_AVAILABLE),
+                ('pdfplumber', self._try_pdfplumber_tables, True),
+                ('docling', self._try_docling, DOCLING_AVAILABLE),
+                ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
+            ]
+        elif pdf_info['layout_type'] == 'text-only':
+            # Text-only documents
+            pipeline_methods = [
+                ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
+                ('pdfminer', self._try_pdfminer_layout, True),
+            ]
+        else:
+            # Default: try all methods in confidence order
+            pipeline_methods = [
+                ('camelot', self._try_camelot, CAMELOT_AVAILABLE),
+                ('docling', self._try_docling, DOCLING_AVAILABLE),
+                ('pdfplumber', self._try_pdfplumber_tables, True),
+                ('pymupdf', self._try_pymupdf, PYMUPDF_AVAILABLE),
+                ('unstructured', self._try_unstructured, UNSTRUCTURED_AVAILABLE),
+                ('img2table', self._try_img2table, IMG2TABLE_AVAILABLE),
+                ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
+                ('pdfminer', self._try_pdfminer_layout, True),
+            ]
 
         best_method = None
         best_products = []
@@ -1152,45 +1268,6 @@ class AutoExtractor:
                 count += 1
 
         return total_confidence / count if count > 0 else 0.0
-
-    def _extract_page_docling_only(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Extract using only Docling (for testing)."""
-        if not DOCLING_AVAILABLE:
-            console.print("[red]Docling not available![/red]")
-            return []
-
-        products = self._try_docling(reader, page_num)
-
-        if not products:
-            self.empty_pages.append(page_num)
-
-        return products
-
-    def _extract_page_unstructured_only(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Extract using only unstructured.io."""
-        if not UNSTRUCTURED_AVAILABLE:
-            console.print("[red]unstructured not available! Install with: pip install unstructured[pdf][/red]")
-            return []
-
-        products = self._try_unstructured(reader, page_num)
-
-        if not products:
-            self.empty_pages.append(page_num)
-
-        return products
-
-    def _extract_page_pymupdf_only(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Extract using only PyMuPDF."""
-        if not PYMUPDF_AVAILABLE:
-            console.print("[red]PyMuPDF not available! Install with: pip install pymupdf[/red]")
-            return []
-
-        products = self._try_pymupdf(reader, page_num)
-
-        if not products:
-            self.empty_pages.append(page_num)
-
-        return products
 
     def _try_docling(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Try extraction using Docling (IBM) - AI-powered table detection."""
@@ -1293,7 +1370,11 @@ class AutoExtractor:
         return products
 
     def _try_pymupdf4llm(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Try extraction using pymupdf4llm - layout-aware markdown text."""
+        """Try extraction using pymupdf4llm - layout-aware markdown text.
+
+        First attempts to parse markdown tables, then falls back to regex
+        extraction on the text content.
+        """
         if not PYMUPDF4LLM_AVAILABLE:
             return []
 
@@ -1301,30 +1382,48 @@ class AutoExtractor:
         if not markdown_text:
             return []
 
-        # Convert markdown to lines for regex extraction
-        # pymupdf4llm preserves layout better, so split by newlines
-        lines = [line.strip() for line in markdown_text.split('\n') if line.strip()]
+        products = []
 
-        # Create a synthetic PageContent for the fallback extractor
-        page_content = PageContent(
-            page_number=page_num,
-            lines=lines,
-            raw_text=markdown_text
-        )
+        # First try to parse markdown tables
+        md_tables = parse_markdown_tables(markdown_text)
+        if md_tables:
+            for table in md_tables:
+                # Convert string table to expected format
+                table_rows = [[{'text': cell, 'bbox': None} for cell in row] for row in table]
+                extracted = extract_products_from_table(
+                    table_rows, page_num, self.pdf_path.name
+                )
+                # Update confidence to pymupdf4llm level
+                for product in extracted:
+                    for location in product.field_locations.values():
+                        location.confidence = CONFIDENCE_PYMUPDF4LLM
+                products.extend(extracted)
 
-        products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+        # If no products from tables, try regex extraction
+        if not products:
+            # Convert markdown to lines for regex extraction
+            lines = [line.strip() for line in markdown_text.split('\n') if line.strip()]
 
-        # Update confidence for pymupdf4llm extraction
-        for product in products:
-            for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
-                if field_name not in product.field_locations:
-                    product.field_locations[field_name] = FieldLocation(
-                        x0=0, y0=0, x1=0, y1=0,
-                        page_number=page_num,
-                        confidence=CONFIDENCE_PYMUPDF4LLM
-                    )
-                else:
-                    product.field_locations[field_name].confidence = CONFIDENCE_PYMUPDF4LLM
+            # Create a synthetic PageContent for the fallback extractor
+            page_content = PageContent(
+                page_number=page_num,
+                lines=lines,
+                raw_text=markdown_text
+            )
+
+            products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
+
+            # Update confidence for pymupdf4llm extraction
+            for product in products:
+                for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
+                    if field_name not in product.field_locations:
+                        product.field_locations[field_name] = FieldLocation(
+                            x0=0, y0=0, x1=0, y1=0,
+                            page_number=page_num,
+                            confidence=CONFIDENCE_PYMUPDF4LLM
+                        )
+                    else:
+                        product.field_locations[field_name].confidence = CONFIDENCE_PYMUPDF4LLM
 
         return products
 

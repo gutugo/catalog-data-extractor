@@ -139,54 +139,9 @@
             margin-bottom: 8px;
         }
 
-        /* Method selector */
-        .method-selector {
-            margin-bottom: 15px;
-        }
-
-        .method-selector label {
-            display: block;
-            font-size: 11px;
-            color: #888;
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .method-select {
-            width: 100%;
-            padding: 8px 10px;
-            background: #16213e;
-            border: 1px solid #0f3460;
-            border-radius: 6px;
-            color: #eee;
-            font-size: 13px;
-            cursor: pointer;
-            appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L2 4h8z'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 10px center;
-        }
-
-        .method-select:hover {
-            border-color: #1a4a7a;
-        }
-
-        .method-select:focus {
-            outline: none;
-            border-color: #e94560;
-        }
-
-        .method-select option {
-            background: #16213e;
-            color: #eee;
-            padding: 8px;
-        }
-
         .method-description {
             font-size: 11px;
             color: #666;
-            margin-top: 6px;
             line-height: 1.4;
         }
 
@@ -934,24 +889,13 @@
                 <h2>Upload New</h2>
             </div>
             <div class="sidebar-section">
-                <div class="method-selector">
-                    <label for="extraction-method">Extraction Method</label>
-                    <select id="extraction-method" class="method-select">
-                        <option value="standard" selected>Standard (pdfplumber)</option>
-                        <option value="pipeline">Pipeline (smart)</option>
-                        <option value="multi_method">Multi-method (all)</option>
-                        <option value="docling_only">Docling AI</option>
-                        <option value="unstructured_only">Unstructured.io</option>
-                        <option value="pymupdf_only">PyMuPDF</option>
-                    </select>
-                    <div class="method-description" id="method-description">
-                        General table extraction with regex fallback. Works well for most catalogs.
-                    </div>
-                </div>
                 <input type="file" id="file-input" accept=".pdf" style="display:none">
                 <div class="upload-zone" id="upload-zone">
                     <div class="upload-icon">+</div>
                     <p>Drop PDF here<br>or click to upload</p>
+                </div>
+                <div class="method-description" style="margin-top: 10px;">
+                    Smart extraction automatically selects the best method for each PDF.
                 </div>
             </div>
         </div>
@@ -1119,36 +1063,8 @@
         // Current catalog name (for highlighting in list)
         let currentCatalog = {% if catalog_name %}{{ catalog_name | tojson }}{% else %}null{% endif %};
 
-        // Extraction method descriptions
-        const methodDescriptions = {
-            'standard': 'General table extraction with regex fallback. Works well for most catalogs.',
-            'pipeline': 'Smart sequential extraction. Tries methods in order of confidence, stops when good results found. Best balance of speed and accuracy.',
-            'multi_method': 'Runs all 8 methods (Camelot, Docling, unstructured, PyMuPDF, pdfplumber, img2table, pymupdf4llm, pdfminer) and merges results by confidence. Most thorough but slower.',
-            'docling_only': 'IBM AI-powered table detection using TableFormer. Best for bordered/complex tables and scanned documents.',
-            'unstructured_only': 'Unstructured.io document understanding with hi-res strategy. Good for varied document layouts and table structures.',
-            'pymupdf_only': 'PyMuPDF native table detection. Very fast with good accuracy for standard table layouts.'
-        };
-
-        // Get selected extraction method
-        function getSelectedMethod() {
-            const select = document.getElementById('extraction-method');
-            return select ? select.value : 'standard';
-        }
-
-        // Setup method selector
-        function setupMethodSelector() {
-            const select = document.getElementById('extraction-method');
-            const descEl = document.getElementById('method-description');
-            if (select && descEl) {
-                select.addEventListener('change', () => {
-                    descEl.textContent = methodDescriptions[select.value] || '';
-                });
-            }
-        }
-
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            setupMethodSelector();
             setupUploadZone();
             loadCatalogs();
             if (!dashboardMode && totalPages > 0) {
@@ -1273,7 +1189,7 @@
                 btn.addEventListener('click', function(e) {
                     e.stopPropagation();  // Don't trigger catalog switch
                     const name = this.dataset.catalog;
-                    if (confirm(`Re-extract "${name}" with ${getSelectedMethod()} method?\n\nThis will replace the existing extraction.`)) {
+                    if (confirm(`Re-extract "${name}"?\n\nThis will replace the existing extraction.`)) {
                         startExtraction(name);
                     }
                 });
@@ -1371,20 +1287,18 @@
 
         async function startExtraction(name) {
             try {
-                const method = getSelectedMethod();
                 const response = await fetch(`/api/extract/${encodeURIComponent(name)}`, {
                     method: 'POST',
                     headers: {
                         'X-CSRF-Token': csrfToken,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ method: method })
+                    body: JSON.stringify({})
                 });
 
                 const result = await response.json();
                 if (result.success) {
-                    const methodLabel = method === 'standard' ? '' : ` (${method.replace('_', '-')})`;
-                    showToast(`Extracting products${methodLabel}...`, 'success');
+                    showToast('Extracting products...', 'success');
                     loadCatalogs(); // Refresh to show extracting status
                     pollExtractionStatus(name);
                 } else {

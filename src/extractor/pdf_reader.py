@@ -94,6 +94,7 @@ class PDFReader:
         self._pdf: Optional[pdfplumber.PDF] = None
         self._docling_result = None  # Cache for Docling conversion (expensive)
         self._docling_lock = threading.Lock()  # Thread-safe cache access
+        self._pdf_classification: Optional[dict] = None  # Cache for PDF classification
 
     def __enter__(self) -> "PDFReader":
         self._pdf = pdfplumber.open(self.pdf_path)
@@ -109,6 +110,143 @@ class PDFReader:
         if not self._pdf:
             raise RuntimeError("PDF not opened. Use context manager.")
         return len(self._pdf.pages)
+
+    def classify_pdf(self, sample_pages: int = 3) -> dict:
+        """Classify PDF for optimal extraction strategy.
+
+        Analyzes the first few pages to determine PDF characteristics:
+        - has_text: Whether the PDF has extractable text
+        - has_borders: Whether tables have visible borders (lines)
+        - is_scanned: Whether the PDF appears to be scanned (image-based)
+        - layout_type: 'tabular', 'borderless', 'text-only', or 'mixed'
+
+        Args:
+            sample_pages: Number of pages to sample (default 3)
+
+        Returns:
+            dict with classification results
+        """
+        if self._pdf_classification is not None:
+            return self._pdf_classification
+
+        if not self._pdf:
+            raise RuntimeError("PDF not opened. Use context manager.")
+
+        pages_to_check = min(sample_pages, self.total_pages)
+
+        total_text_chars = 0
+        total_lines = 0  # PDF drawing lines (table borders)
+        total_rects = 0  # PDF rectangles (table borders)
+        total_images = 0
+        pages_with_tables = 0
+        total_table_cells = 0
+
+        for page_idx in range(pages_to_check):
+            page = self._pdf.pages[page_idx]
+
+            # Check for extractable text
+            text = page.extract_text() or ""
+            total_text_chars += len(text.strip())
+
+            # Check for line objects (table borders)
+            # pdfplumber exposes lines and rects for border detection
+            lines = page.lines or []
+            rects = page.rects or []
+            total_lines += len(lines)
+            total_rects += len(rects)
+
+            # Check for images (potential scanned content)
+            images = page.images or []
+            total_images += len(images)
+
+            # Try to find tables to assess table presence
+            try:
+                tables = page.find_tables()
+                if tables:
+                    pages_with_tables += 1
+                    for table in tables:
+                        rows = table.extract()
+                        total_table_cells += sum(len(row) for row in rows if row)
+            except Exception:
+                pass
+
+        # Determine classification
+        avg_text_per_page = total_text_chars / pages_to_check if pages_to_check else 0
+        avg_lines_per_page = total_lines / pages_to_check if pages_to_check else 0
+        avg_rects_per_page = total_rects / pages_to_check if pages_to_check else 0
+        avg_images_per_page = total_images / pages_to_check if pages_to_check else 0
+
+        # Has extractable text? (more than 100 chars per page on average)
+        has_text = avg_text_per_page > 100
+
+        # Has table borders? (lines or rects that could form tables)
+        # Tables typically have multiple horizontal/vertical lines
+        has_borders = (avg_lines_per_page > 5) or (avg_rects_per_page > 3)
+
+        # Is scanned? (lots of images, little text)
+        is_scanned = (avg_images_per_page > 0.5 and avg_text_per_page < 50)
+
+        # Determine layout type
+        # Note: pdfplumber's find_tables() can miss borderless tables,
+        # so we use additional heuristics
+        if pages_with_tables > 0:
+            if has_borders:
+                layout_type = 'tabular'  # Tables with visible borders
+            else:
+                layout_type = 'borderless'  # Tables without visible borders
+        elif has_borders and has_text:
+            # Has lines/rects but find_tables didn't detect - likely borderless tables
+            # or tables that pdfplumber couldn't identify
+            layout_type = 'tabular'
+        elif has_text and avg_text_per_page > 500:
+            # Lots of text - could be text-only or borderless tables
+            # Check if text appears to be tabular (multiple columns)
+            layout_type = 'borderless'  # Assume borderless until proven otherwise
+        elif has_text:
+            layout_type = 'text-only'
+        else:
+            layout_type = 'mixed'  # Unclear structure
+
+        self._pdf_classification = {
+            'has_text': has_text,
+            'has_borders': has_borders,
+            'is_scanned': is_scanned,
+            'layout_type': layout_type,
+            # Additional diagnostic info
+            'avg_text_chars': avg_text_per_page,
+            'avg_lines': avg_lines_per_page,
+            'avg_rects': avg_rects_per_page,
+            'avg_images': avg_images_per_page,
+            'pages_with_tables': pages_with_tables,
+            'sample_pages': pages_to_check,
+        }
+
+        return self._pdf_classification
+
+    def _detect_page_borders(self, page_number: int) -> bool:
+        """Detect if a specific page has bordered tables.
+
+        Args:
+            page_number: 1-indexed page number
+
+        Returns:
+            True if page appears to have bordered tables
+        """
+        if not self._pdf:
+            raise RuntimeError("PDF not opened. Use context manager.")
+
+        page = self._pdf.pages[page_number - 1]
+
+        # Check for line objects (table borders)
+        lines = page.lines or []
+        rects = page.rects or []
+
+        # Count horizontal and vertical lines
+        h_lines = sum(1 for l in lines if abs(l.get('top', 0) - l.get('bottom', 0)) < 2)
+        v_lines = sum(1 for l in lines if abs(l.get('x0', 0) - l.get('x1', 0)) < 2)
+
+        # A bordered table typically has multiple horizontal and vertical lines
+        return (h_lines >= 3 and v_lines >= 2) or len(rects) >= 4
 
     def get_page(self, page_number: int) -> PageContent:
         """Extract content from a specific page (1-indexed).
@@ -261,8 +399,11 @@ class PDFReader:
 
         return result
 
-    def extract_tables_camelot(self, page_number: int) -> list[dict]:
+    def extract_tables_camelot(self, page_number: int, flavor: str | None = None) -> list[dict]:
         """Extract tables using Camelot (higher accuracy for some PDFs).
+
+        Automatically detects whether to use 'lattice' (bordered tables) or
+        'stream' (borderless tables) mode based on page content.
 
         Returns same format as extract_tables_with_positions() for compatibility:
         - 'rows': list of rows, each row is a list of cell dicts with 'text' and 'bbox'
@@ -270,6 +411,7 @@ class PDFReader:
 
         Args:
             page_number: 1-indexed page number
+            flavor: 'lattice', 'stream', or None (auto-detect)
 
         Returns:
             List of table dicts with position data, or empty list if Camelot unavailable
@@ -278,17 +420,32 @@ class PDFReader:
             return []
 
         try:
-            # Use stream flavor for tables without visible borders
+            # Auto-detect flavor based on page borders
+            if flavor is None:
+                has_borders = self._detect_page_borders(page_number)
+                flavor = 'lattice' if has_borders else 'stream'
+
             tables = camelot.read_pdf(
                 str(self.pdf_path),
                 pages=str(page_number),
-                flavor='stream'
+                flavor=flavor
             )
         except Exception as e:
-            warning_msg = f"Camelot failed on page {page_number}: {e}"
+            warning_msg = f"Camelot ({flavor}) failed on page {page_number}: {e}"
             print(f"Warning: {warning_msg}", file=sys.stderr)
             ExtractionWarning.add(warning_msg)
-            return []
+            # If lattice failed, try stream as fallback
+            if flavor == 'lattice':
+                try:
+                    tables = camelot.read_pdf(
+                        str(self.pdf_path),
+                        pages=str(page_number),
+                        flavor='stream'
+                    )
+                except Exception:
+                    return []
+            else:
+                return []
 
         result = []
         for table in tables:
@@ -690,24 +847,76 @@ class PDFReader:
             return []
 
     def _parse_html_table(self, html: str) -> list[list[dict]]:
-        """Parse HTML table string into rows of cell dicts."""
-        import re
-        rows = []
+        """Parse HTML table string into rows of cell dicts.
 
-        # Find all rows
-        row_matches = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
-        for row_html in row_matches:
-            row_data = []
-            # Find all cells (td or th)
-            cell_matches = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.DOTALL | re.IGNORECASE)
-            for cell_html in cell_matches:
-                # Strip HTML tags from cell content
-                cell_text = re.sub(r'<[^>]+>', '', cell_html).strip()
-                row_data.append({'text': cell_text, 'bbox': None})
-            if row_data:
-                rows.append(row_data)
+        Uses proper HTML parser instead of regex for robust handling
+        of nested tags, entities, and malformed HTML.
+        """
+        from html.parser import HTMLParser
+        from html import unescape
 
-        return rows
+        class TableHTMLParser(HTMLParser):
+            """Proper HTML table parser."""
+
+            def __init__(self):
+                super().__init__()
+                self.rows: list[list[str]] = []
+                self.current_row: list[str] = []
+                self.current_cell: str = ""
+                self.in_cell = False
+
+            def handle_starttag(self, tag: str, attrs: list) -> None:
+                tag = tag.lower()
+                if tag == 'tr':
+                    self.current_row = []
+                elif tag in ('td', 'th'):
+                    self.current_cell = ""
+                    self.in_cell = True
+                elif tag == 'br' and self.in_cell:
+                    self.current_cell += " "
+
+            def handle_data(self, data: str) -> None:
+                if self.in_cell:
+                    self.current_cell += data
+
+            def handle_endtag(self, tag: str) -> None:
+                tag = tag.lower()
+                if tag in ('td', 'th'):
+                    self.in_cell = False
+                    self.current_row.append(self.current_cell.strip())
+                elif tag == 'tr':
+                    if self.current_row:
+                        self.rows.append(self.current_row)
+                    self.current_row = []
+
+            def handle_entityref(self, name: str) -> None:
+                if self.in_cell:
+                    self.current_cell += unescape(f'&{name};')
+
+            def handle_charref(self, name: str) -> None:
+                if self.in_cell:
+                    self.current_cell += unescape(f'&#{name};')
+
+        parser = TableHTMLParser()
+        try:
+            parser.feed(html)
+        except Exception:
+            # Fallback to simple regex if parsing fails
+            import re
+            rows = []
+            row_matches = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+            for row_html in row_matches:
+                row_data = []
+                cell_matches = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.DOTALL | re.IGNORECASE)
+                for cell_html in cell_matches:
+                    cell_text = re.sub(r'<[^>]+>', '', cell_html).strip()
+                    row_data.append({'text': cell_text, 'bbox': None})
+                if row_data:
+                    rows.append(row_data)
+            return rows
+
+        # Convert parsed rows to expected format
+        return [[{'text': cell, 'bbox': None} for cell in row] for row in parser.rows]
 
     def extract_tables_pymupdf(self, page_num: int) -> list[dict]:
         """Extract tables using PyMuPDF (fitz) - fast native table detection.
