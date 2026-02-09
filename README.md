@@ -5,6 +5,7 @@ Extract product data from PDF supplier catalogs using smart automatic extraction
 ## Features
 
 - **Smart automatic extraction** - Classifies PDFs and selects optimal extraction methods
+- **Multi-column support** - Word-level extraction for two-column OTC catalogs with multi-line products
 - **Multi-method pipeline** - Tries multiple extraction methods with confidence scoring
 - **Drag-and-drop upload** - Add PDF catalogs directly in the browser
 - **Split-view verification** - PDF on left, extracted data on right
@@ -90,6 +91,7 @@ Based on classification, optimal methods are selected:
 
 | PDF Type | Methods Used |
 |----------|--------------|
+| Multi-column OTC | multicolumn (word-level) → fallback to table methods |
 | Digital + Bordered | Camelot → pdfplumber → PyMuPDF → pdfminer |
 | Digital + Borderless | img2table → pdfplumber → Docling → pymupdf4llm |
 | Scanned | Docling → unstructured |
@@ -101,6 +103,7 @@ Based on classification, optimal methods are selected:
 |--------|------------|----------|
 | Camelot | 1.0 | Bordered tables (requires ghostscript) |
 | Docling | 0.98 | Complex tables, scanned docs (IBM AI) |
+| Multi-column | 0.95 | Two-column OTC catalogs with multi-line products |
 | pdfplumber | 0.95 | General tables |
 | PyMuPDF | 0.93 | Fast native table detection |
 | Unstructured | 0.92 | Varied document layouts |
@@ -109,11 +112,23 @@ Based on classification, optimal methods are selected:
 | pdfminer | 0.80 | Text layout analysis |
 | Regex | 0.50 | Text pattern fallback |
 
+### Multi-Column Extraction
+
+For two-column OTC catalogs (e.g., AETNA) where products span multiple lines per column:
+
+1. Extracts words with x/y positions from each page
+2. Detects column gaps via word coverage histogram
+3. Splits words into columns, reconstructs lines, parses multi-line products
+4. Produces clean `item_no` ("A1 / 446761"), `product_name`, `pkg`, and `uom`
+
+This runs automatically when the layout is detected — no configuration needed.
+
 ### Pipeline Behavior
 
-1. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
-2. **Fallback** - Merges results from all methods if no single method is sufficient
-3. **Validation** - Filters out false positives (spec data mistaken for products)
+1. **Multi-Column Check** - If two-column layout detected, tries word-level extraction first
+2. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
+3. **Fallback** - Merges results from all methods if no single method is sufficient
+4. **Validation** - Filters out false positives (spec data mistaken for products)
 
 ## Web UI Guide
 

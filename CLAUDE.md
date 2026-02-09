@@ -32,20 +32,27 @@ The extractor automatically classifies PDFs and selects the best extraction meth
    - `is_scanned`: Whether the PDF is scanned/image-based
    - `layout_type`: 'tabular', 'borderless', 'text-only', or 'mixed'
 
-2. **Smart Method Selection** - Based on classification:
+2. **Multi-Column Detection** - Samples first 15 pages for two-column OTC-style layouts:
+   - Builds word x-coverage histogram to find vertical gaps (≥10pt, density ≤1)
+   - Verifies OTC item codes (`[A-Z]\d{1,3}`) appear on both sides of the gap
+   - If detected, multicolumn extraction runs first on every page (confidence 0.95)
+   - Falls back to single-column parsing for half-filled pages (e.g., last product page)
+
+3. **Smart Method Selection** - Based on classification (if multicolumn not detected):
 
 | PDF Type | Methods Used |
 |----------|--------------|
+| Multi-column OTC | multicolumn (word-level) → fallback to table methods |
 | Digital + Bordered | Camelot → pdfplumber → PyMuPDF → pdfminer |
 | Digital + Borderless | img2table → pdfplumber → Docling → pymupdf4llm |
 | Scanned | Docling → unstructured |
 | Text-only | pymupdf4llm → pdfminer |
 
-3. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
+4. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
 
-4. **Fallback** - Merges results from all methods if no single method is sufficient, then tries regex as last resort
+5. **Fallback** - Merges results from all methods if no single method is sufficient, then tries regex as last resort
 
-5. **Validation** - Filters out false positives (spec data mistaken for products)
+6. **Validation** - Filters out false positives (spec data mistaken for products)
 
 ### Available Methods (by confidence)
 
@@ -53,6 +60,7 @@ The extractor automatically classifies PDFs and selects the best extraction meth
 |--------|------------|----------|
 | Camelot | 1.0 | Bordered tables (requires ghostscript) |
 | Docling | 0.98 | Complex tables, scanned docs (IBM AI) |
+| Multi-column | 0.95 | Two-column OTC catalogs with multi-line products |
 | pdfplumber | 0.95 | General tables |
 | PyMuPDF | 0.93 | Fast native table detection |
 | Unstructured | 0.92 | Varied document layouts |
@@ -122,6 +130,39 @@ Filters out false positives from brochure-style catalogs that have specification
 - **Multi-word descriptions**: Text with spaces (unless combined identifiers like "UPC / SKU")
 
 **Note:** This app is designed for **product listing catalogs** with SKUs, item numbers, prices, and quantities. Marketing brochures with product descriptions and spec tables will correctly return 0 products.
+
+## Multi-Column Extraction
+
+Handles two-column, multi-line product layouts (e.g., AETNA OTC catalogs) that break standard table extractors.
+
+### How It Works
+
+1. **Word-level extraction** — `PDFReader.extract_words()` gets each word with x/y position
+2. **Gap detection** — Histogram of word x-coverage finds low-density vertical gaps (≥10pt wide, ≤1 word density) in the middle 25-75% of the page
+3. **Layout verification** — Confirms OTC item codes (`[A-Z]\d{1,3}`) appear on both sides of the gap
+4. **Column splitting** — Words assigned to left/right by center position relative to boundary
+5. **Line reconstruction** — Words grouped into lines by y-proximity (±3pt tolerance)
+6. **Product parsing** — Walks lines looking for the multi-line product pattern:
+   - Line 1: `[Code: A1] [description words] [$Price]`
+   - Line 2: `[Description continuation]` (optional)
+   - Line 3: `[6-digit UPC] [description] [Size Unit]` (optional)
+
+### Product Fields
+
+- `item_no`: Combined as "A1 / 446761" (code + UPC via `combine_identifiers`)
+- `product_name`: Cleaned description text
+- `pkg` / `uom`: Parsed from size info (e.g., "8 OZ" → pkg="8", uom="oz")
+
+### Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `detect_column_gaps()` | Histogram-based vertical gap detection |
+| `split_words_into_columns()` | Assign words to left/right columns |
+| `reconstruct_lines_from_words()` | Group words into lines by y-position |
+| `detect_multicolumn_layout()` | Verify two-column OTC layout |
+| `parse_multicolumn_products()` | Parse multi-line products within a column |
+| `AutoExtractor._try_multicolumn()` | Pipeline method with single-column fallback |
 
 ## Docling (IBM AI Extraction)
 
