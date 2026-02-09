@@ -248,6 +248,64 @@ class PDFReader:
         # A bordered table typically has multiple horizontal and vertical lines
         return (h_lines >= 3 and v_lines >= 2) or len(rects) >= 4
 
+    def extract_words(self, page_number: int) -> list[dict]:
+        """Extract individual words with positions from a page using pdfplumber.
+
+        Returns list of word dicts with keys: text, x0, top, x1, bottom.
+
+        Args:
+            page_number: 1-indexed page number
+
+        Returns:
+            List of word dicts with position data
+        """
+        if not self._pdf:
+            raise RuntimeError("PDF not opened. Use context manager.")
+
+        if page_number < 1 or page_number > self.total_pages:
+            raise ValueError(f"Page {page_number} out of range (1-{self.total_pages})")
+
+        page = self._pdf.pages[page_number - 1]
+
+        try:
+            words = page.extract_words(
+                keep_blank_chars=False,
+                extra_attrs=["top", "bottom"],
+            )
+            return [
+                {
+                    'text': w['text'],
+                    'x0': w['x0'],
+                    'top': w['top'],
+                    'x1': w['x1'],
+                    'bottom': w['bottom'],
+                }
+                for w in words
+            ]
+        except Exception as e:
+            warning_msg = f"Failed to extract words from page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
+            return []
+
+    def get_page_dimensions(self, page_number: int) -> tuple[float, float]:
+        """Get width and height of a page.
+
+        Args:
+            page_number: 1-indexed page number
+
+        Returns:
+            (width, height) tuple
+        """
+        if not self._pdf:
+            raise RuntimeError("PDF not opened. Use context manager.")
+
+        if page_number < 1 or page_number > self.total_pages:
+            raise ValueError(f"Page {page_number} out of range (1-{self.total_pages})")
+
+        page = self._pdf.pages[page_number - 1]
+        return (float(page.width), float(page.height))
+
     def get_page(self, page_number: int) -> PageContent:
         """Extract content from a specific page (1-indexed).
 

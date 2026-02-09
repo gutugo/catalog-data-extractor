@@ -31,6 +31,7 @@ CONFIDENCE_PYMUPDF = 0.93       # Good - fast native table detection
 CONFIDENCE_IMG2TABLE = 0.90     # Good - borderless table specialist
 CONFIDENCE_PYMUPDF4LLM = 0.85   # Good - layout-aware markdown text
 CONFIDENCE_PDFMINER = 0.8       # Fair - layout analysis
+CONFIDENCE_MULTICOLUMN = 0.95   # High - word-level multi-column parsing
 CONFIDENCE_REGEX = 0.5          # Low - text pattern fallback
 
 # Patterns for identifying valid item numbers
@@ -218,6 +219,362 @@ SKIP_PATTERNS = [
     re.compile(r'Keep this catalog', re.IGNORECASE),
     re.compile(r'^\*', re.IGNORECASE),
 ]
+
+
+# --- Multi-column OTC catalog patterns ---
+# Matches short alpha-numeric item codes like A1, B12, C52, E146
+OTC_ITEM_CODE_PATTERN = re.compile(r'^[A-Z]\d{1,3}$')
+# Matches 5-6 digit UPC/SKU numbers
+OTC_SKU_PATTERN = re.compile(r'^\d{5,6}$')
+# Price token like "$16" or "$8" (integer dollar amounts common in OTC catalogs)
+OTC_PRICE_PATTERN = re.compile(r'^\$\d+$')
+
+
+def detect_column_gaps(words: list[dict], page_width: float) -> list[float]:
+    """Find vertical gaps in word coverage that indicate column boundaries.
+
+    Builds a histogram of word x-coverage and looks for low-density regions
+    in the middle 25-75% of the page. Uses a density-based approach: a "gap"
+    is a region where coverage drops to <=1 (allows for stray page numbers)
+    for at least 10pt, flanked by high-density columns on both sides.
+
+    Args:
+        words: List of word dicts with x0, x1 keys
+        page_width: Width of the page
+
+    Returns:
+        List of gap midpoints (x-coordinates of column boundaries)
+    """
+    if not words or page_width <= 0:
+        return []
+
+    # Build a coverage histogram with 1pt resolution
+    bins = int(page_width) + 1
+    histogram = [0] * bins
+
+    for w in words:
+        x_start = max(0, int(w['x0']))
+        x_end = min(bins - 1, int(w['x1']))
+        for x in range(x_start, x_end + 1):
+            histogram[x] += 1
+
+    # Look for low-density regions in the middle 25-75% of the page
+    left_bound = int(page_width * 0.25)
+    right_bound = int(page_width * 0.75)
+
+    # A gap is a region where density drops to <=1 (stray words allowed)
+    LOW_DENSITY_THRESHOLD = 1
+    MIN_GAP_WIDTH = 10
+
+    gaps = []
+    in_gap = False
+    gap_start = 0
+
+    for x in range(left_bound, right_bound + 1):
+        if histogram[x] <= LOW_DENSITY_THRESHOLD:
+            if not in_gap:
+                in_gap = True
+                gap_start = x
+        else:
+            if in_gap:
+                gap_width = x - gap_start
+                if gap_width >= MIN_GAP_WIDTH:
+                    gaps.append(gap_start + gap_width / 2)
+                in_gap = False
+
+    # Check if we ended inside a gap
+    if in_gap:
+        gap_width = right_bound - gap_start
+        if gap_width >= MIN_GAP_WIDTH:
+            gaps.append(gap_start + gap_width / 2)
+
+    return gaps
+
+
+def split_words_into_columns(words: list[dict], boundary: float) -> tuple[list[dict], list[dict]]:
+    """Split words into left and right columns based on a boundary x-coordinate.
+
+    Assigns each word to left or right based on which side its center falls.
+
+    Args:
+        words: List of word dicts with x0, x1 keys
+        boundary: X-coordinate of the column boundary
+
+    Returns:
+        (left_words, right_words) tuple
+    """
+    left = []
+    right = []
+    for w in words:
+        center = (w['x0'] + w['x1']) / 2
+        if center < boundary:
+            left.append(w)
+        else:
+            right.append(w)
+    return left, right
+
+
+def reconstruct_lines_from_words(words: list[dict], y_tolerance: float = 3.0) -> list[dict]:
+    """Group words into lines by y-position proximity.
+
+    Words within y_tolerance of each other vertically are grouped into the same line.
+    Lines are sorted top-to-bottom, words within a line sorted left-to-right.
+
+    Args:
+        words: List of word dicts with text, x0, top, x1, bottom keys
+        y_tolerance: Maximum vertical distance to consider words on the same line
+
+    Returns:
+        List of line dicts with keys: text, words, x0, top
+    """
+    if not words:
+        return []
+
+    # Sort words by vertical position first
+    sorted_words = sorted(words, key=lambda w: (w['top'], w['x0']))
+
+    lines = []
+    current_line_words = [sorted_words[0]]
+    current_top = sorted_words[0]['top']
+
+    for w in sorted_words[1:]:
+        if abs(w['top'] - current_top) <= y_tolerance:
+            current_line_words.append(w)
+        else:
+            # Finalize current line
+            current_line_words.sort(key=lambda w: w['x0'])
+            line_text = ' '.join(w['text'] for w in current_line_words)
+            lines.append({
+                'text': line_text,
+                'words': current_line_words,
+                'x0': current_line_words[0]['x0'],
+                'top': current_top,
+            })
+            current_line_words = [w]
+            current_top = w['top']
+
+    # Don't forget the last line
+    if current_line_words:
+        current_line_words.sort(key=lambda w: w['x0'])
+        line_text = ' '.join(w['text'] for w in current_line_words)
+        lines.append({
+            'text': line_text,
+            'words': current_line_words,
+            'x0': current_line_words[0]['x0'],
+            'top': current_top,
+        })
+
+    return lines
+
+
+def detect_multicolumn_layout(words: list[dict], page_width: float) -> float | None:
+    """Detect whether the page has a two-column OTC-style layout.
+
+    Checks:
+    1. A column gap exists near the center of the page
+    2. OTC item codes (A1, B12, etc.) appear at two distinct x-positions
+
+    Args:
+        words: List of word dicts
+        page_width: Width of the page
+
+    Returns:
+        Column boundary x-coordinate if detected, None otherwise
+    """
+    gaps = detect_column_gaps(words, page_width)
+    if not gaps:
+        return None
+
+    # Use the gap closest to the center
+    center = page_width / 2
+    best_gap = min(gaps, key=lambda g: abs(g - center))
+
+    # Verify: look for OTC item codes at two distinct x-positions
+    code_x_positions = []
+    for w in words:
+        if OTC_ITEM_CODE_PATTERN.match(w['text']):
+            code_x_positions.append(w['x0'])
+
+    if len(code_x_positions) < 2:
+        return None
+
+    # Check that codes appear on both sides of the gap
+    left_codes = [x for x in code_x_positions if x < best_gap]
+    right_codes = [x for x in code_x_positions if x >= best_gap]
+
+    if left_codes and right_codes:
+        return best_gap
+
+    return None
+
+
+def parse_multicolumn_products(lines: list[dict], page_number: int,
+                                source_file: str) -> list[Product]:
+    """Parse products from reconstructed lines within a single column.
+
+    Each product follows this pattern:
+      Line 1: [Code: A1] [opt. description words] [$Price]
+      Line 2: [Description continuation]  (optional)
+      Line 3: [6-digit UPC/SKU] [opt. desc] [Size Unit]  (optional)
+
+    Section headers (ALL CAPS or Title Case, no code/price) are skipped.
+
+    Args:
+        lines: Reconstructed line dicts (from reconstruct_lines_from_words)
+        page_number: Page number for product metadata
+        source_file: Source PDF filename
+
+    Returns:
+        List of Product objects
+    """
+    products = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        line_words = line['words']
+
+        if not line_words:
+            i += 1
+            continue
+
+        first_word = line_words[0]['text']
+
+        # Check if this line starts a product (first word is OTC item code)
+        if not OTC_ITEM_CODE_PATTERN.match(first_word):
+            # Not a product start — skip (section header or stray line)
+            i += 1
+            continue
+
+        item_code = first_word  # e.g., "A1"
+
+        # Extract price from rightmost words if present
+        # OTC prices are "$XX" or "$X" (integer) — possibly split as "$16" or "$" + "16"
+        price_found = False
+        desc_words = []
+
+        for w in line_words[1:]:
+            if OTC_PRICE_PATTERN.match(w['text']):
+                price_found = True
+                # Skip price words from description
+                continue
+            # Also handle split price: "$" followed by number
+            if w['text'] == '$':
+                price_found = True
+                continue
+            if price_found and re.match(r'^\d+$', w['text']):
+                # This is the number part of a split price, skip it
+                continue
+            # Also skip "00" that follows dollar amount (e.g. "$16 00" format)
+            if w['text'] == '00' and price_found:
+                continue
+            desc_words.append(w['text'])
+
+        description_parts = desc_words
+        upc_sku = ''
+        pkg = ''
+        uom = ''
+
+        # Look ahead for continuation lines
+        j = i + 1
+        while j < len(lines):
+            next_line = lines[j]
+            next_words = next_line['words']
+
+            if not next_words:
+                j += 1
+                continue
+
+            next_first = next_words[0]['text']
+
+            # If next line starts with an OTC item code, it's a new product
+            if OTC_ITEM_CODE_PATTERN.match(next_first):
+                break
+
+            # If next line starts with a 5-6 digit SKU, it's the UPC/size line
+            if OTC_SKU_PATTERN.match(next_first):
+                upc_sku = next_first
+
+                # Remaining words on this line: description or size info
+                remaining = [w['text'] for w in next_words[1:]]
+
+                # Try to detect size/uom from the end of the line
+                # Pattern: last 1-2 words form "NUMBER UNIT" (e.g., "8 OZ", "100 CT")
+                if len(remaining) >= 2:
+                    potential_count = remaining[-2]
+                    potential_unit = remaining[-1]
+                    # Check if it matches a count/uom pattern
+                    combined = f"{potential_count} {potential_unit}"
+                    parsed_pkg, parsed_uom = parse_count_uom(combined)
+                    if parsed_uom:
+                        pkg = parsed_pkg
+                        uom = parsed_uom
+                        # Words before size are part of description
+                        description_parts.extend(remaining[:-2])
+                    else:
+                        # Try single last word as size (e.g., "16OZ")
+                        parsed_pkg, parsed_uom = parse_count_uom(remaining[-1])
+                        if parsed_uom:
+                            pkg = parsed_pkg
+                            uom = parsed_uom
+                            description_parts.extend(remaining[:-1])
+                        else:
+                            description_parts.extend(remaining)
+                elif len(remaining) == 1:
+                    # Single remaining word — could be size like "16OZ"
+                    parsed_pkg, parsed_uom = parse_count_uom(remaining[0])
+                    if parsed_uom:
+                        pkg = parsed_pkg
+                        uom = parsed_uom
+                    else:
+                        description_parts.extend(remaining)
+
+                j += 1
+                break  # UPC line is always last line of a product
+            else:
+                # Continuation description line — but skip section headers
+                line_text = next_line['text']
+                # Section header: ALL CAPS text with no item code or price
+                is_header = (
+                    re.match(r'^[A-Z][A-Z\s&,\-/]+$', line_text) and
+                    len(line_text) > 3 and
+                    not OTC_PRICE_PATTERN.search(line_text)
+                )
+                if is_header:
+                    j += 1
+                    break  # Section header ends current product context
+
+                # Add description words (skip price tokens)
+                for w in next_words:
+                    if not OTC_PRICE_PATTERN.match(w['text']) and w['text'] != '$' and w['text'] != '00':
+                        description_parts.append(w['text'])
+                j += 1
+
+        # Build item_no from code + UPC
+        combined_item_no = combine_identifiers(item_code, upc_sku, '')
+
+        product_name = clean_product_name(' '.join(description_parts))
+
+        products.append(Product(
+            product_name=product_name,
+            description='',
+            item_no=combined_item_no,
+            pkg=pkg,
+            uom=uom,
+            page_number=page_number,
+            source_file=source_file,
+            field_locations={
+                'item_no': FieldLocation(
+                    x0=0, y0=0, x1=0, y1=0,
+                    page_number=page_number,
+                    confidence=CONFIDENCE_MULTICOLUMN
+                ),
+            },
+        ))
+
+        i = j  # Advance past the lines consumed by this product
+
+    return products
 
 
 def parse_count_uom(count_str: str) -> tuple[str, str]:
@@ -1184,6 +1541,7 @@ class AutoExtractor:
         self.session_dir = session_dir
         self.empty_pages: list[int] = []  # Track pages with no products found
         self.pipeline_stats: dict[str, int] = defaultdict(int)  # Track which methods succeeded
+        self._multicolumn_detected: bool | None = None  # Cache: None=untested, True/False=result
 
     def run(self, progress_callback=None, show_console=True) -> ExtractionSession:
         """Run automatic extraction on all pages.
@@ -1302,6 +1660,27 @@ class AutoExtractor:
         MIN_PRODUCTS_THRESHOLD = 1  # Minimum products to consider method successful
         all_results: list[tuple[str, list[Product]]] = []
 
+        # Detect multi-column layout by sampling first few content pages, cache result
+        if self._multicolumn_detected is None:
+            self._multicolumn_detected = False
+            # Sample up to 15 pages to find one with multi-column layout
+            # (skips cover pages, TOC, intros, etc.)
+            for sample_page in range(1, min(reader.total_pages + 1, 16)):
+                words = reader.extract_words(sample_page)
+                if len(words) < 20:
+                    continue  # Skip sparse pages (covers, blanks)
+                page_width, _ = reader.get_page_dimensions(sample_page)
+                if detect_multicolumn_layout(words, page_width) is not None:
+                    self._multicolumn_detected = True
+                    break
+
+        # If multi-column layout detected, try it first (high confidence, fast)
+        if self._multicolumn_detected:
+            products = self._try_multicolumn(reader, page_num)
+            if products:
+                self.pipeline_stats['multicolumn'] += 1
+                return products
+
         # Get PDF classification for smart method selection
         pdf_info = reader.classify_pdf()
 
@@ -1417,6 +1796,47 @@ class AutoExtractor:
                 count += 1
 
         return total_confidence / count if count > 0 else 0.0
+
+    def _try_multicolumn(self, reader: PDFReader, page_num: int) -> list[Product]:
+        """Try multi-column word-level extraction for OTC-style catalogs.
+
+        Extracts words with positions, detects two-column layout, splits into
+        columns, reconstructs lines, and parses multi-line products.
+        Falls back to single-column parsing when this page has codes on one side only.
+        """
+        words = reader.extract_words(page_num)
+        if not words:
+            return []
+
+        page_width, _ = reader.get_page_dimensions(page_num)
+
+        boundary = detect_multicolumn_layout(words, page_width)
+
+        if boundary is not None:
+            # Two-column layout detected on this page
+            left_words, right_words = split_words_into_columns(words, boundary)
+            products = []
+            for col_words in (left_words, right_words):
+                if not col_words:
+                    continue
+                col_lines = reconstruct_lines_from_words(col_words)
+                col_products = parse_multicolumn_products(
+                    col_lines, page_num, self.pdf_path.name
+                )
+                products.extend(col_products)
+            return filter_valid_products(products)
+
+        # No two-column layout on this page, but multicolumn was detected globally.
+        # Try single-column parsing (e.g. last page with only left column).
+        has_otc_codes = any(OTC_ITEM_CODE_PATTERN.match(w['text']) for w in words)
+        if has_otc_codes:
+            all_lines = reconstruct_lines_from_words(words)
+            products = parse_multicolumn_products(
+                all_lines, page_num, self.pdf_path.name
+            )
+            return filter_valid_products(products)
+
+        return []
 
     def _try_docling(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Try extraction using Docling (IBM) - AI-powered table detection."""
