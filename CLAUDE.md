@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Catalog Data Extractor - Extracts product data from PDF supplier catalogs using smart automatic extraction with a web-based verification UI.
+Catalog Data Extractor - Extracts product data from PDF supplier catalogs using GLM-OCR (vision-based AI) with a web-based verification UI.
 
 ## Key Directories
 
@@ -11,7 +11,7 @@ src/extractor/
   auto_extractor.py     # GLM-OCR pipeline orchestrator + text fallback
   glm_ocr.py            # GLM-OCR client via Ollama HTTP API
   patterns.py           # Regex patterns and confidence constants
-  parsing_utils.py      # Shared parsing utilities (count/UOM, item validation)
+  parsing_utils.py      # Shared parsing utilities (count/UOM, item validation, HTML/MD table parsing)
   product_validation.py # False-positive filtering
   multicolumn.py        # Two-column OTC layout detection and parsing
   column_detection.py   # Column mapping and table-to-product extraction
@@ -54,55 +54,97 @@ product_validation.py    (imports patterns)
 multicolumn.py           (imports patterns, parsing_utils, data_model)
 column_detection.py      (imports patterns, parsing_utils, data_model)
     ↑
+glm_ocr.py               (no internal deps — standalone HTTP client)
+    ↑
 auto_extractor.py        (imports all above + pdf_reader, re-exports everything)
 ```
 
-`auto_extractor.py` re-exports all public names from submodules for backward compatibility. Code that imports from `auto_extractor` (e.g., `from extractor.auto_extractor import extract_products_from_table`) continues to work unchanged.
+`auto_extractor.py` re-exports all public names from submodules for backward compatibility.
 
 ## Extraction
 
-The extractor uses **GLM-OCR** (via Ollama) as the sole extraction method. Each page is rendered to a PNG image, sent to the GLM-OCR model for table recognition, and the returned markdown is parsed into Product objects.
+Uses **GLM-OCR** (via Ollama) as the sole extraction method. Each page is rendered to a PNG image, sent to GLM-OCR for table recognition, and the response is parsed into Product objects.
 
 ### How It Works
 
-1. **Page Rendering** — Each PDF page is rendered to a high-res PNG (144 DPI) using PyMuPDF
-2. **GLM-OCR Recognition** — The image is sent to GLM-OCR via Ollama with a "Table Recognition:" prompt
-3. **Markdown Parsing** — The model returns markdown tables which are parsed via `parse_markdown_tables()`
-4. **Product Extraction** — Parsed tables are converted to Product objects via `extract_products_from_table()`
-5. **Text Fallback** — If no tables are found in the markdown, regex-based text extraction is used
+1. **Page Rendering** — Each PDF page rendered to PNG (108 DPI, zoom=1.5) using PyMuPDF
+2. **GLM-OCR Recognition** — Image sent to GLM-OCR via Ollama with "Table Recognition:" prompt
+3. **Response Parsing** — Model returns HTML tables (parsed via `parse_html_tables()`) or markdown tables (parsed via `parse_markdown_tables()`)
+4. **Product Extraction** — Parsed tables converted to Product objects via `extract_products_from_table()`
+5. **Text Fallback** — If no tables found, regex-based text extraction on raw OCR output
 6. **Validation** — Filters out false positives (spec data mistaken for products)
+7. **Retry** — On Ollama 500 errors, retries up to 2 times with backoff (2s, 4s)
 
 ### GLM-OCR Setup
 
-GLM-OCR requires Ollama running with the `glm-ocr` model:
+Requires Ollama running with the `glm-ocr` model:
 
 ```bash
-# Install model
+# Install model (F16 — full precision, 2.2 GB)
 ollama pull glm-ocr
+
+# Or Q8 quantized (faster, 1.6 GB, ~22% speed improvement)
+ollama pull glm-ocr:q8_0
 
 # Verify
 ollama list | grep glm-ocr
 ```
 
-Configure the Ollama endpoint via environment variable:
+Configure Ollama endpoint:
 ```bash
 # Default: localhost
 export OLLAMA_HOST=http://localhost:11434
 
-# Remote server (e.g., mini01)
-export OLLAMA_HOST=http://mini01:11434
-
-# Or use SSH tunnel
-ssh -L 11434:localhost:11434 mini01
+# Remote server via SSH tunnel (recommended for mini01)
+ssh -f -N -L 11434:localhost:11434 mini01
 ```
 
 ### GLM-OCR Model Details
 
-- **Model**: GLM-OCR (0.9B params, MIT license)
+- **Model**: GLM-OCR (1.1B params, MIT license)
 - **Architecture**: CogViT encoder + GLM-0.5B decoder
 - **Benchmark**: #1 on OmniDocBench V1.5 (94.62 score)
-- **Speed**: ~1.86 pages/sec (GPU), ~0.67 images/sec
-- **Confidence**: 0.97 (assigned to all extracted products)
+- **Output format**: HTML `<table>` elements (not markdown as documented)
+- **Context length**: 131,072 tokens
+
+### Available Quantizations
+
+| Tag | Size | Speed (M4 GPU) |
+|-----|------|-----------------|
+| `glm-ocr:latest` (F16) | 2.2 GB | ~29 sec/page |
+| `glm-ocr:q8_0` | 1.6 GB | ~23 sec/page |
+| `glm-ocr:bf16` | 2.2 GB | ~29 sec/page |
+
+### Performance Benchmarks (tested on mini01 Mac Mini M4)
+
+| Catalog | Pages | Products | Time (F16) | Time (Q8) |
+|---------|-------|----------|------------|-----------|
+| 2026-MSHO OTC | 36 | 960 | 17:20 | 13:35 |
+| AETNA OTC | 40 | 955 | ~15:00 | — |
+| Vascular Surgery | 264 | 71 | — | 47:43 |
+
+**Bottleneck is model inference** (~23-29 sec/page), not network. Running on mini01 directly vs remote SSH tunnel makes minimal difference.
+
+### GLM-OCR vs Old Pipeline Comparison
+
+**Structured catalogs (OTC with tables):**
+
+| Metric | Old (pdfplumber) | GLM-OCR |
+|--------|------------------|---------|
+| Products | 960 | 960 |
+| Item format | SKU only (`100032`) | Catalog # + SKU (`O98 / 100032`) |
+| SKU overlap | — | 99.3% match |
+| Speed | ~30 sec | ~14 min |
+
+**Unstructured catalogs (surgical instruments):**
+
+| Metric | Old (regex fallback) | GLM-OCR |
+|--------|---------------------|---------|
+| Products | 93 (87 garbage) | 71 (all real) |
+| Quality | Page headers as products | Valid catalog codes (tk*) |
+| Speed | 2.5 min | 48 min |
+
+**Summary**: GLM-OCR matches old pipeline on structured PDFs and dramatically outperforms on unstructured/visual catalogs. Trade-off is speed.
 
 ### Usage
 
@@ -111,6 +153,14 @@ from extractor.auto_extractor import AutoExtractor
 
 extractor = AutoExtractor(pdf_path, session_dir)
 session = extractor.run()
+```
+
+To use Q8 model:
+```python
+from extractor.glm_ocr import GlmOcrClient
+ext = AutoExtractor(pdf_path, session_dir)
+ext._glm_client = GlmOcrClient(model="glm-ocr:q8_0")
+session = ext.run()
 ```
 
 ## Web UI
@@ -131,19 +181,6 @@ session = extractor.run()
 ### CSRF Protection
 All POST endpoints require `X-CSRF-Token` header.
 
-### Extract API Example
-
-```javascript
-fetch('/api/extract/catalog-name', {
-    method: 'POST',
-    headers: {
-        'X-CSRF-Token': csrfToken,
-        'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({})
-});
-```
-
 ## Column Detection
 
 Defined in `column_detection.py`. Uses multi-signal approach for robust column mapping:
@@ -157,60 +194,7 @@ Key functions: `detect_column_mapping()`, `detect_columns_robust()`, `find_count
 
 ## Product Validation
 
-Defined in `product_validation.py`. Filters out false positives from brochure-style catalogs that have specification tables instead of product listings. Rejects:
-
-- **Measurements**: 75kg, 200cm, 10mm, dimensions (200x85cm)
-- **Electrical specs**: 12V, 220V, 50Hz, IPX4 ratings
-- **Standards codes**: BS 7177, EN 597-1, ISO 9001
-- **Time/range values**: 10Minutes, 10-20
-- **Pure alphabetic values**: Real SKUs almost always contain digits
-- **Multi-word descriptions**: Text with spaces (unless combined identifiers like "UPC / SKU")
-
-**Note:** This app is designed for **product listing catalogs** with SKUs, item numbers, prices, and quantities. Marketing brochures with product descriptions and spec tables will correctly return 0 products.
-
-## Multi-Column Extraction
-
-Defined in `multicolumn.py`. Handles two-column, multi-line product layouts (e.g., AETNA OTC catalogs) that break standard table extractors.
-
-### How It Works
-
-1. **Word-level extraction** — `PDFReader.extract_words()` gets each word with x/y position
-2. **Gap detection** — Histogram of word x-coverage finds low-density vertical gaps (≥10pt wide, ≤1 word density) in the middle 25-75% of the page
-3. **Layout verification** — Confirms OTC item codes (`[A-Z]\d{1,3}`) appear on both sides of the gap
-4. **Column splitting** — Words assigned to left/right by center position relative to boundary
-5. **Line reconstruction** — Words grouped into lines by y-proximity (±3pt tolerance)
-6. **Product parsing** — Walks lines looking for the multi-line product pattern:
-   - Line 1: `[Code: A1] [description words] [$Price]`
-   - Line 2: `[Description continuation]` (optional)
-   - Line 3: `[6-digit UPC] [description] [Size Unit]` (optional)
-
-### Product Fields
-
-- `item_no`: Combined as "A1 / 446761" (code + UPC via `combine_identifiers`)
-- `product_name`: Cleaned description text
-- `pkg` / `uom`: Parsed from size info (e.g., "8 OZ" → pkg="8", uom="oz")
-
-### Key Functions
-
-| Function | Module | Purpose |
-|----------|--------|---------|
-| `detect_column_gaps()` | `multicolumn.py` | Histogram-based vertical gap detection |
-| `split_words_into_columns()` | `multicolumn.py` | Assign words to left/right columns |
-| `reconstruct_lines_from_words()` | `multicolumn.py` | Group words into lines by y-position |
-| `detect_multicolumn_layout()` | `multicolumn.py` | Verify two-column OTC layout |
-| `parse_multicolumn_products()` | `multicolumn.py` | Parse multi-line products within a column |
-| `AutoExtractor._try_multicolumn()` | `auto_extractor.py` | Pipeline method with single-column fallback |
-
-## Patterns and Constants
-
-Defined in `patterns.py`. All regex patterns and confidence constants live here as the single source of truth. Other modules import from this file. Key patterns:
-
-- `ITEM_NO_PATTERN` — Validates item numbers (4-5 digit, alphanumeric, hyphenated)
-- `UOM_UNITS` — Raw string of all recognized unit abbreviations
-- `COUNT_UOM_PATTERN` — Parses "32 ct.", "100 pk" etc.
-- `FALSE_POSITIVE_PATTERNS` — Detects spec data masquerading as products
-- `OTC_*_PATTERN` — OTC catalog-specific patterns (item codes, SKUs, prices)
-- `HEADER_PATTERNS`, `SKIP_PATTERNS` — Table header/footer detection
+Defined in `product_validation.py`. Filters out false positives from brochure-style catalogs that have specification tables instead of product listings. Rejects measurements, electrical specs, standards codes, time/range values, pure alphabetic values, multi-word descriptions.
 
 ## Parsing Utilities
 
@@ -220,23 +204,30 @@ Defined in `parsing_utils.py`. Shared functions used by multiple extraction modu
 - `is_valid_item_no(value)` — Validates item number format
 - `clean_product_name(name)` — Normalizes whitespace
 - `combine_identifiers(upc, sku, item_no)` — Joins with " / " separator
-- `parse_markdown_tables(text)` — Extracts tables from markdown text
+- `parse_markdown_tables(text)` — Extracts tables from pipe-delimited markdown
+- `parse_html_tables(html)` — Extracts tables from HTML `<table>` elements (GLM-OCR output)
 
-## Docling (IBM AI Extraction)
+## GLM-OCR Client
 
-### Model Cache
-- Location: `~/.cache/huggingface/hub/`
-- Models: `docling-layout-heron` (164 MB), `docling-models` (342 MB)
-- Total: ~506 MB (downloaded once, cached)
+Defined in `glm_ocr.py`. Communicates with GLM-OCR via the Ollama HTTP API.
 
-### Behavior
-- Processes **entire PDF at once**, caches result
-- First run is slow (model download + full PDF conversion)
-- Progress shows 0% until full document is processed
+```python
+from extractor.glm_ocr import GlmOcrClient
+
+client = GlmOcrClient()  # uses OLLAMA_HOST env var or localhost:11434
+client.check_availability()  # True if Ollama has glm-ocr model
+markdown = client.recognize_table(png_bytes)  # "Table Recognition:" prompt
+text = client.recognize_text(png_bytes)       # "Text Recognition:" prompt
+```
+
+- Uses `urllib.request` (no extra dependencies)
+- Timeout: 120 seconds per request
+- Retries: 2 retries with backoff on 500 errors
+- Raises `GlmOcrError` on connection/parsing failures
 
 ## Testing
 
-255 tests using pytest. Run with:
+273 tests using pytest. Run with:
 
 ```bash
 # Run all tests
@@ -247,9 +238,6 @@ uv run pytest --cov=extractor --cov-report=term-missing
 
 # Run a specific test file
 uv run pytest tests/test_patterns.py -v
-
-# Run a specific test class
-uv run pytest tests/test_data_model.py::TestProduct -v
 ```
 
 Test configuration is in `pyproject.toml` (`[tool.pytest.ini_options]`).
@@ -270,6 +258,25 @@ uv run extractor status
 
 # Export to CSV
 uv run extractor export catalog-name
+
+# SSH tunnel to mini01 Ollama
+ssh -f -N -L 11434:localhost:11434 mini01
+```
+
+## Server Deployment (mini01)
+
+Project is deployed on mini01 at `~/catalogdataextractor/`.
+
+```bash
+# Sync code to mini01
+rsync -avz --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
+  /Users/sk/catalogdataextractor/ mini01:~/catalogdataextractor/
+
+# Install deps on mini01
+ssh mini01 "cd ~/catalogdataextractor && uv sync"
+
+# Run extraction on mini01 directly
+ssh mini01 "cd ~/catalogdataextractor && uv run extractor auto catalogs/file.pdf"
 ```
 
 ## Dependencies
@@ -283,28 +290,6 @@ uv run extractor export catalog-name
 **Dev:**
 - pytest, pytest-cov
 
-Install dev:
-```bash
-uv pip install pytest pytest-cov
-```
-
-## GLM-OCR Client
-
-Defined in `glm_ocr.py`. Communicates with GLM-OCR via the Ollama HTTP API.
-
-```python
-from extractor.glm_ocr import GlmOcrClient
-
-client = GlmOcrClient()  # uses OLLAMA_HOST env var or localhost:11434
-client.check_availability()  # True if Ollama has glm-ocr model
-markdown = client.recognize_table(png_bytes)  # "Table Recognition:" prompt
-text = client.recognize_text(png_bytes)       # "Text Recognition:" prompt
-```
-
-- Uses `urllib.request` (no extra dependencies)
-- Timeout: 120 seconds per request
-- Raises `GlmOcrError` on connection/parsing failures
-
 ## Troubleshooting
 
 ### GLM-OCR not available
@@ -315,14 +300,18 @@ ollama list | grep glm-ocr
 ollama pull glm-ocr
 ```
 
+### Ollama 500 errors
+The model may return HTTP 500 when overloaded. The client retries automatically (2 retries with 2s/4s backoff). If persistent, check Ollama logs:
+```bash
+# On mini01
+ssh mini01 "journalctl -u ollama --tail 20"
+```
+
 ### Empty extractions
 **If 0 products extracted:**
-1. Check if it's a product listing catalog (has SKUs/item numbers) vs a brochure (just descriptions)
-2. Brochures correctly return 0 products - they're not compatible with this tool
-3. Check available methods - some require optional dependencies:
-```bash
-uv run python -c "from extractor.pdf_reader import *; print('Docling:', DOCLING_AVAILABLE); print('Camelot:', CAMELOT_AVAILABLE)"
-```
+1. Check if it's a product listing catalog (has SKUs/item numbers) vs a brochure
+2. Visual/image-heavy catalogs may have few parseable tables
+3. Check GLM-OCR connectivity: `uv run python -c "from extractor.glm_ocr import GlmOcrClient; print(GlmOcrClient().check_availability())"`
 
 ### Re-extract a catalog
 Delete session file and re-run:
@@ -338,4 +327,3 @@ uv run extractor web-verify --port 5002
 ## Git Branches
 
 - `main` - Stable release
-- `feature/multi-method-extraction` - Development branch
