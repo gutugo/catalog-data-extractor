@@ -62,6 +62,7 @@ from .parsing_utils import (  # noqa: F401
     clean_product_name,
     combine_identifiers,
     parse_markdown_tables,
+    parse_html_tables,
 )
 from .product_validation import (  # noqa: F401
     is_false_positive_item_no,
@@ -419,8 +420,8 @@ class AutoExtractor:
 
         products = []
 
-        # Try parsing markdown tables first
-        md_tables = parse_markdown_tables(markdown_text)
+        # Try parsing tables (HTML first since GLM-OCR often returns HTML, then markdown)
+        md_tables = parse_html_tables(markdown_text) or parse_markdown_tables(markdown_text)
         if md_tables:
             for table in md_tables:
                 table_rows = [[{'text': cell, 'bbox': None} for cell in row] for row in table]

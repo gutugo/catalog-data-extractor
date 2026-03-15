@@ -147,3 +147,80 @@ def parse_markdown_tables(text: str) -> list[list[list[str]]]:
         tables.append(current_table)
 
     return tables
+
+
+def parse_html_tables(html: str) -> list[list[list[str]]]:
+    """Parse HTML tables into rows of cell strings.
+
+    Handles GLM-OCR output which returns <table> HTML instead of markdown.
+
+    Args:
+        html: HTML string potentially containing <table> elements
+
+    Returns:
+        List of tables, each table is a list of rows, each row is a list of cell strings
+    """
+    from html.parser import HTMLParser
+    from html import unescape as html_unescape
+
+    class _TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tables: list[list[list[str]]] = []
+            self.current_table: list[list[str]] = []
+            self.current_row: list[str] = []
+            self.current_cell: str = ""
+            self.in_cell = False
+
+        def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
+            if tag == 'table':
+                self.current_table = []
+            elif tag == 'tr':
+                self.current_row = []
+            elif tag in ('td', 'th'):
+                self.current_cell = ""
+                self.in_cell = True
+            elif tag == 'br' and self.in_cell:
+                self.current_cell += " "
+
+        def handle_data(self, data):
+            if self.in_cell:
+                self.current_cell += data
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if tag in ('td', 'th'):
+                self.in_cell = False
+                self.current_row.append(self.current_cell.strip())
+            elif tag == 'tr':
+                if self.current_row:
+                    self.current_table.append(self.current_row)
+                self.current_row = []
+            elif tag == 'table':
+                if self.current_table and len(self.current_table) >= 2:
+                    self.tables.append(self.current_table)
+                self.current_table = []
+
+        def handle_entityref(self, name):
+            if self.in_cell:
+                self.current_cell += html_unescape(f'&{name};')
+
+        def handle_charref(self, name):
+            if self.in_cell:
+                self.current_cell += html_unescape(f'&#{name};')
+
+    if '<table' not in html.lower():
+        return []
+
+    parser = _TableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+
+    # Catch any unclosed table
+    if parser.current_table and len(parser.current_table) >= 2:
+        parser.tables.append(parser.current_table)
+
+    return parser.tables
