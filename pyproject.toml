@@ -28,6 +28,10 @@ all = [
     "docling>=2.0.0",
     "img2table>=1.2.0",
 ]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
 
 [project.scripts]
 extractor = "extractor.cli:app"
@@ -35,6 +39,10 @@ extractor = "extractor.cli:app"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/extractor"]

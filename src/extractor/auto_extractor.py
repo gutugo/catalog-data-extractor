@@ -20,1264 +20,71 @@ from .pdf_reader import (
     UNSTRUCTURED_AVAILABLE,
 )
 
+# Re-export from submodules for backward compatibility
+from .patterns import (  # noqa: F401
+    CONFIDENCE_DOCLING,
+    CONFIDENCE_CAMELOT,
+    CONFIDENCE_UNSTRUCTURED,
+    CONFIDENCE_PDFPLUMBER,
+    CONFIDENCE_PYMUPDF,
+    CONFIDENCE_IMG2TABLE,
+    CONFIDENCE_PYMUPDF4LLM,
+    CONFIDENCE_PDFMINER,
+    CONFIDENCE_MULTICOLUMN,
+    CONFIDENCE_REGEX,
+    ITEM_NO_PATTERN,
+    UOM_UNITS,
+    COUNT_UOM_PATTERN,
+    COUNT_COLUMN_PATTERN,
+    PRODUCT_LINE_PATTERN,
+    DUAL_ID_PATTERN,
+    MULTILINE_ITEM_PATTERN,
+    CODE_PRICE_PATTERN,
+    ITEM_PREFIX_PATTERN,
+    SLASH_UOM_PATTERN,
+    HEADER_PATTERNS,
+    FALSE_POSITIVE_PATTERNS,
+    IDENTIFIER_HEADER_PATTERNS,
+    PRODUCT_NAME_HEADER_PATTERNS,
+    COUNT_HEADER_PATTERNS,
+    SKIP_PATTERNS,
+    OTC_ITEM_CODE_PATTERN,
+    OTC_SKU_PATTERN,
+    OTC_PRICE_PATTERN,
+    PRICE_PATTERN,
+    NUMERIC_ONLY_PATTERN,
+)
+from .parsing_utils import (  # noqa: F401
+    parse_count_uom,
+    is_valid_item_no,
+    clean_product_name,
+    combine_identifiers,
+    parse_markdown_tables,
+)
+from .product_validation import (  # noqa: F401
+    is_false_positive_item_no,
+    validate_product,
+    filter_valid_products,
+)
+from .multicolumn import (  # noqa: F401
+    detect_column_gaps,
+    split_words_into_columns,
+    reconstruct_lines_from_words,
+    detect_multicolumn_layout,
+    parse_multicolumn_products,
+)
+from .column_detection import (  # noqa: F401
+    is_header_row,
+    should_skip_row,
+    detect_column_mapping,
+    detect_columns_robust,
+    find_count_column,
+    extract_products_from_table,
+    _get_cell_text,
+    _get_cell_bbox,
+)
+
 console = Console()
-
-# Confidence scores for different extraction methods
-CONFIDENCE_DOCLING = 0.98       # High - AI table detection (IBM TableFormer)
-CONFIDENCE_CAMELOT = 1.0        # Highest - traditional table detection
-CONFIDENCE_UNSTRUCTURED = 0.92  # High - document understanding with layout analysis
-CONFIDENCE_PDFPLUMBER = 0.95    # Good - pdfplumber table extraction
-CONFIDENCE_PYMUPDF = 0.93       # Good - fast native table detection
-CONFIDENCE_IMG2TABLE = 0.90     # Good - borderless table specialist
-CONFIDENCE_PYMUPDF4LLM = 0.85   # Good - layout-aware markdown text
-CONFIDENCE_PDFMINER = 0.8       # Fair - layout analysis
-CONFIDENCE_MULTICOLUMN = 0.95   # High - word-level multi-column parsing
-CONFIDENCE_REGEX = 0.5          # Low - text pattern fallback
-
-# Patterns for identifying valid item numbers
-# Matches:
-#   - 4-5 digit numbers: 12345, 1234
-#   - Alphanumeric with prefix + digits: PMS989803150181, BJ100120, DBTDCF-A2310EN
-#   - Hyphenated codes with digits: TTRS-42, VR-1234, CS-2
-#   - Letter codes with digits: TSTAG1, TSTAG2
-# Must contain at least one digit to avoid matching plain words like "ABC-DEF"
-ITEM_NO_PATTERN = re.compile(
-    r'^('
-    r'[A-Z]{0,4}\d{4,}[-\dA-Z]*'          # Prefix + 4+ digits (PMS989803150181, BJ100120)
-    r'|[A-Z]{1,6}-(?=[\dA-Z-]*\d)[A-Z\d][\dA-Z-]*'  # Letter-hyphen-alphanumeric, must have digit (TTRS-42, CS-2)
-    r'|[A-Z]{2,6}\d+[A-Z\d]*'             # Letters + digits (TSTAG1, BJ240120)
-    r'|\d{4,5}'                            # 4-5 digit numbers
-    r')$',
-    re.IGNORECASE
-)
-
-# Patterns for parsing count/uom strings like "32 ct.", "100 pk", or "1,000 ct."
-# Note: UOM_UNITS is the single source of truth for unit patterns
-# Includes standard units and /RL, /EACH style formats found in various catalogs
-UOM_UNITS = r'ct|pk|pack|bx|oz|gm|ml|lb|qt|pt|bag|roll|pr|dz|set|btl|tube|jar|can|box|ea|sheets?|pair|kit|rl|cs|each|case|carton|drum|gal|pail|tub'
-
-COUNT_UOM_PATTERN = re.compile(
-    rf'^([\d,]+)\s*({UOM_UNITS})\.?$',
-    re.IGNORECASE
-)
-
-# Pattern for count column detection (unit is optional, for partial matches)
-# Handles both "32 ct." and "2,500/RL" formats
-COUNT_COLUMN_PATTERN = re.compile(
-    rf'^[\d,]+\s*[/]?\s*({UOM_UNITS})?\.?$',
-    re.IGNORECASE
-)
-
-# Pattern for single-line product extraction: item_no, description, count, price
-PRODUCT_LINE_PATTERN = re.compile(
-    rf'^(\d{{4,5}})\s+(.+?)\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
-    re.IGNORECASE
-)
-
-# Pattern for dual-identifier format: UPC SKU DESCRIPTION SIZE $PRICE
-# Example: "A1 446761 ACNE CONTROL CLEANSER 8 OZ $16"
-# UPC is short alphanumeric (A1, A11, B2, etc.), SKU is 5-6 digits
-DUAL_ID_PATTERN = re.compile(
-    rf'^([A-Z]\d{{1,3}})\s+(\d{{5,6}})\s+(.+?)\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
-    re.IGNORECASE
-)
-
-# Pattern for item_no, count, price on one line (multi-line product name above)
-MULTILINE_ITEM_PATTERN = re.compile(
-    rf'^(\d{{4,5}})\s+(\d+\s*(?:{UOM_UNITS})\.?)\s+\$(\d+\.?\d*)$',
-    re.IGNORECASE
-)
-
-# Pattern: CODE $PRICE /UNIT (e.g., "PMS989803150181 $42.26 /EACH")
-# Used for product cards in specialty catalogs
-# Code must contain at least one digit to avoid matching plain words
-CODE_PRICE_PATTERN = re.compile(
-    r'^([A-Z]{2,4}(?=[\dA-Z-]*\d)[\dA-Z-]+)\s+\$([\d,]+\.?\d*)\s*/?(EACH|PAIR|RL|BX|CS|PK|EA|CT)\b',
-    re.IGNORECASE
-)
-
-# Pattern: "Item #" or "Item#" followed by code (e.g., "Item # TTRS-42")
-# Code must contain at least one digit
-ITEM_PREFIX_PATTERN = re.compile(
-    r'Item\s*#?\s*:?\s*([A-Z]{0,4}(?=[\dA-Z-]*\d)[\dA-Z][\dA-Z-]*)',
-    re.IGNORECASE
-)
-
-# Pattern for quantity with slash-prefix UOM (e.g., "2,500/RL", "100/EACH")
-SLASH_UOM_PATTERN = re.compile(
-    rf'^([\d,]+)\s*/\s*({UOM_UNITS})$',
-    re.IGNORECASE
-)
-
-# Header patterns to skip (used for detecting header rows)
-HEADER_PATTERNS = [
-    re.compile(r'^Item\s*#?$', re.IGNORECASE),
-    re.compile(r'^Description$', re.IGNORECASE),
-    re.compile(r'^Count$', re.IGNORECASE),
-    re.compile(r'^Price$', re.IGNORECASE),
-    re.compile(r'^SKU\s*#?$', re.IGNORECASE),
-    re.compile(r'^UPC', re.IGNORECASE),
-    re.compile(r'^Product\s*(Name|Code)?$', re.IGNORECASE),
-]
-
-# False positive patterns - specification values that look like item numbers
-# These are commonly found in product brochures/spec sheets, not product listings
-FALSE_POSITIVE_PATTERNS = [
-    # Measurements with units (75kg, 200cm, 10mm, 5m, 12inches)
-    re.compile(r'^\d+\.?\d*\s*(kg|g|lb|oz|cm|mm|m|inches?|in|ft|feet)\.?$', re.IGNORECASE),
-    # Dimension patterns (200x85x203cm, 29x185cm, 10x20)
-    re.compile(r'^\d+\.?\d*\s*x\s*\d+', re.IGNORECASE),
-    # Dimension with slash (210/250mm, 100/200cm)
-    re.compile(r'^\d+\s*/\s*\d+\s*(mm|cm|m|kg|g).*$', re.IGNORECASE),
-    # Dimension with diameter (205mmdiameter)
-    re.compile(r'^\d+\s*(mm|cm|m)\s*diameter$', re.IGNORECASE),
-    # Time values (10Minutes, 5Hours, 30Seconds, 2hrs)
-    re.compile(r'^\d+\.?\d*\s*(minutes?|mins?|hours?|hrs?|seconds?|secs?|days?)\.?$', re.IGNORECASE),
-    # Comma-separated time/value lists (10, 15, 20, 25mins)
-    re.compile(r'^[\d,\s]+\s*(mins?|hours?|secs?)$', re.IGNORECASE),
-    # Percentage values (50%, 99.9%)
-    re.compile(r'^\d+\.?\d*\s*%$'),
-    # Temperature values (37°C, 98.6°F, 25C, 77F)
-    re.compile(r'^\d+\.?\d*\s*°?[CF]$', re.IGNORECASE),
-    # Voltage/current/power (12V, 220V, 5A, 100W, 50Hz)
-    re.compile(r'^\d+\.?\d*\s*(V|A|W|Hz|kW|mA|VA)$', re.IGNORECASE),
-    # Pressure values (10bar, 100psi, 5kPa)
-    re.compile(r'^\d+\.?\d*\s*(bar|psi|kPa|MPa|Pa)$', re.IGNORECASE),
-    # Capacity/volume (5L, 500ml, 10gal)
-    re.compile(r'^\d+\.?\d*\s*(L|ml|gal|liters?|litres?)$', re.IGNORECASE),
-    # Speed/rate values (100rpm, 50m/s)
-    re.compile(r'^\d+\.?\d*\s*(rpm|m/s|km/h|mph)$', re.IGNORECASE),
-    # Range patterns (10-20, 5~10)
-    re.compile(r'^\d+\.?\d*\s*[-~]\s*\d+\.?\d*$'),
-    # IP ratings (IPX4, IP65, IP67)
-    re.compile(r'^IP[X\d]\d?$', re.IGNORECASE),
-    # Class ratings (Class1, Class 2, ClassII)
-    re.compile(r'^Class\s*[1-9IVX]+$', re.IGNORECASE),
-    # Standards codes (BS 7177, EN 597-1, ISO 9001)
-    re.compile(r'^(BS|EN|ISO|IEC|ANSI|UL|CE|CSA)\s*\d+', re.IGNORECASE),
-    # Spec labels ending with colon (Weight:, Size:, Dimensions:)
-    re.compile(r'^[A-Za-z\s]+:$'),
-    # Pure descriptive words that might slip through
-    re.compile(r'^(Yes|No|N/?A|None|Standard|Optional|Included|Available)$', re.IGNORECASE),
-    # Descriptive phrases with measurements embedded (20 cm side bolster, High MVTR 4 stretch)
-    re.compile(r'^\d+\s*(cm|mm|m)\s+\w+', re.IGNORECASE),
-    # Text with embedded numbers that aren't codes (High MVTR 4 stretch PU)
-    re.compile(r'^[A-Za-z]+\s+[A-Za-z]*\s*\d+\s+[A-Za-z]+', re.IGNORECASE),
-]
-
-# Identifier column header patterns - maps header text to field name
-# Order matters: more specific patterns should come first
-IDENTIFIER_HEADER_PATTERNS = {
-    'upc': [
-        re.compile(r'^UPC\s*(Code|#)?$', re.IGNORECASE),
-        re.compile(r'^Universal\s*Product\s*Code$', re.IGNORECASE),
-        re.compile(r'^Barcode$', re.IGNORECASE),
-        re.compile(r'^GTIN$', re.IGNORECASE),
-        re.compile(r'^EAN(-13)?$', re.IGNORECASE),
-    ],
-    'sku': [
-        re.compile(r'^SKU\s*(#|No\.?)?$', re.IGNORECASE),
-        re.compile(r'^Stock\s*(Keeping\s*Unit|#|No\.?)?$', re.IGNORECASE),
-        re.compile(r'^Vendor\s*(#|No\.?)?$', re.IGNORECASE),
-    ],
-    'item_no': [
-        re.compile(r'^Item\s*(#|No\.?|Number)?$', re.IGNORECASE),
-        re.compile(r'^Part\s*(#|No\.?|Number)?$', re.IGNORECASE),
-        re.compile(r'^Catalog\s*(#|No\.?|Number)?$', re.IGNORECASE),
-        re.compile(r'^Cat\s*(#|No\.?)?$', re.IGNORECASE),
-        re.compile(r'^Product\s*(#|Code|ID)$', re.IGNORECASE),
-        re.compile(r'^Model\s*(#|No\.?|Number)?$', re.IGNORECASE),
-        re.compile(r'^Code$', re.IGNORECASE),
-        re.compile(r'^ID$', re.IGNORECASE),
-        re.compile(r'^NDC$', re.IGNORECASE),  # National Drug Code
-        re.compile(r'^MPN$', re.IGNORECASE),  # Manufacturer Part Number
-    ],
-}
-
-# Product name/description header patterns
-PRODUCT_NAME_HEADER_PATTERNS = [
-    re.compile(r'^Description$', re.IGNORECASE),
-    re.compile(r'^Product\s*(Name)?$', re.IGNORECASE),
-    re.compile(r'^Item\s*(Name|Description)$', re.IGNORECASE),
-    re.compile(r'^Name$', re.IGNORECASE),
-]
-
-# Count/quantity header patterns
-COUNT_HEADER_PATTERNS = [
-    re.compile(r'^Count$', re.IGNORECASE),
-    re.compile(r'^Qty\.?$', re.IGNORECASE),
-    re.compile(r'^Quantity$', re.IGNORECASE),
-    re.compile(r'^Pack\s*(Size)?$', re.IGNORECASE),
-    re.compile(r'^Size$', re.IGNORECASE),
-    re.compile(r'^Unit$', re.IGNORECASE),
-]
-
-# Skip patterns for footer/note rows
-SKIP_PATTERNS = [
-    re.compile(r'See Page', re.IGNORECASE),
-    re.compile(r'Please note', re.IGNORECASE),
-    re.compile(r'Keep this catalog', re.IGNORECASE),
-    re.compile(r'^\*', re.IGNORECASE),
-]
-
-
-# --- Multi-column OTC catalog patterns ---
-# Matches short alpha-numeric item codes like A1, B12, C52, E146
-OTC_ITEM_CODE_PATTERN = re.compile(r'^[A-Z]\d{1,3}$')
-# Matches 5-6 digit UPC/SKU numbers
-OTC_SKU_PATTERN = re.compile(r'^\d{5,6}$')
-# Price token like "$16" or "$8" (integer dollar amounts common in OTC catalogs)
-OTC_PRICE_PATTERN = re.compile(r'^\$\d+$')
-
-
-def detect_column_gaps(words: list[dict], page_width: float) -> list[float]:
-    """Find vertical gaps in word coverage that indicate column boundaries.
-
-    Builds a histogram of word x-coverage and looks for low-density regions
-    in the middle 25-75% of the page. Uses a density-based approach: a "gap"
-    is a region where coverage drops to <=1 (allows for stray page numbers)
-    for at least 10pt, flanked by high-density columns on both sides.
-
-    Args:
-        words: List of word dicts with x0, x1 keys
-        page_width: Width of the page
-
-    Returns:
-        List of gap midpoints (x-coordinates of column boundaries)
-    """
-    if not words or page_width <= 0:
-        return []
-
-    # Build a coverage histogram with 1pt resolution
-    bins = int(page_width) + 1
-    histogram = [0] * bins
-
-    for w in words:
-        x_start = max(0, int(w['x0']))
-        x_end = min(bins - 1, int(w['x1']))
-        for x in range(x_start, x_end + 1):
-            histogram[x] += 1
-
-    # Look for low-density regions in the middle 25-75% of the page
-    left_bound = int(page_width * 0.25)
-    right_bound = int(page_width * 0.75)
-
-    # A gap is a region where density drops to <=1 (stray words allowed)
-    LOW_DENSITY_THRESHOLD = 1
-    MIN_GAP_WIDTH = 10
-
-    gaps = []
-    in_gap = False
-    gap_start = 0
-
-    for x in range(left_bound, right_bound + 1):
-        if histogram[x] <= LOW_DENSITY_THRESHOLD:
-            if not in_gap:
-                in_gap = True
-                gap_start = x
-        else:
-            if in_gap:
-                gap_width = x - gap_start
-                if gap_width >= MIN_GAP_WIDTH:
-                    gaps.append(gap_start + gap_width / 2)
-                in_gap = False
-
-    # Check if we ended inside a gap
-    if in_gap:
-        gap_width = right_bound - gap_start
-        if gap_width >= MIN_GAP_WIDTH:
-            gaps.append(gap_start + gap_width / 2)
-
-    return gaps
-
-
-def split_words_into_columns(words: list[dict], boundary: float) -> tuple[list[dict], list[dict]]:
-    """Split words into left and right columns based on a boundary x-coordinate.
-
-    Assigns each word to left or right based on which side its center falls.
-
-    Args:
-        words: List of word dicts with x0, x1 keys
-        boundary: X-coordinate of the column boundary
-
-    Returns:
-        (left_words, right_words) tuple
-    """
-    left = []
-    right = []
-    for w in words:
-        center = (w['x0'] + w['x1']) / 2
-        if center < boundary:
-            left.append(w)
-        else:
-            right.append(w)
-    return left, right
-
-
-def reconstruct_lines_from_words(words: list[dict], y_tolerance: float = 3.0) -> list[dict]:
-    """Group words into lines by y-position proximity.
-
-    Words within y_tolerance of each other vertically are grouped into the same line.
-    Lines are sorted top-to-bottom, words within a line sorted left-to-right.
-
-    Args:
-        words: List of word dicts with text, x0, top, x1, bottom keys
-        y_tolerance: Maximum vertical distance to consider words on the same line
-
-    Returns:
-        List of line dicts with keys: text, words, x0, top
-    """
-    if not words:
-        return []
-
-    # Sort words by vertical position first
-    sorted_words = sorted(words, key=lambda w: (w['top'], w['x0']))
-
-    lines = []
-    current_line_words = [sorted_words[0]]
-    current_top = sorted_words[0]['top']
-
-    for w in sorted_words[1:]:
-        if abs(w['top'] - current_top) <= y_tolerance:
-            current_line_words.append(w)
-        else:
-            # Finalize current line
-            current_line_words.sort(key=lambda w: w['x0'])
-            line_text = ' '.join(w['text'] for w in current_line_words)
-            lines.append({
-                'text': line_text,
-                'words': current_line_words,
-                'x0': current_line_words[0]['x0'],
-                'top': current_top,
-            })
-            current_line_words = [w]
-            current_top = w['top']
-
-    # Don't forget the last line
-    if current_line_words:
-        current_line_words.sort(key=lambda w: w['x0'])
-        line_text = ' '.join(w['text'] for w in current_line_words)
-        lines.append({
-            'text': line_text,
-            'words': current_line_words,
-            'x0': current_line_words[0]['x0'],
-            'top': current_top,
-        })
-
-    return lines
-
-
-def detect_multicolumn_layout(words: list[dict], page_width: float) -> float | None:
-    """Detect whether the page has a two-column OTC-style layout.
-
-    Checks:
-    1. A column gap exists near the center of the page
-    2. OTC item codes (A1, B12, etc.) appear at two distinct x-positions
-
-    Args:
-        words: List of word dicts
-        page_width: Width of the page
-
-    Returns:
-        Column boundary x-coordinate if detected, None otherwise
-    """
-    gaps = detect_column_gaps(words, page_width)
-    if not gaps:
-        return None
-
-    # Use the gap closest to the center
-    center = page_width / 2
-    best_gap = min(gaps, key=lambda g: abs(g - center))
-
-    # Verify: look for OTC item codes at two distinct x-positions
-    code_x_positions = []
-    for w in words:
-        if OTC_ITEM_CODE_PATTERN.match(w['text']):
-            code_x_positions.append(w['x0'])
-
-    if len(code_x_positions) < 2:
-        return None
-
-    # Check that codes appear on both sides of the gap
-    left_codes = [x for x in code_x_positions if x < best_gap]
-    right_codes = [x for x in code_x_positions if x >= best_gap]
-
-    if left_codes and right_codes:
-        return best_gap
-
-    return None
-
-
-def parse_multicolumn_products(lines: list[dict], page_number: int,
-                                source_file: str) -> list[Product]:
-    """Parse products from reconstructed lines within a single column.
-
-    Each product follows this pattern:
-      Line 1: [Code: A1] [opt. description words] [$Price]
-      Line 2: [Description continuation]  (optional)
-      Line 3: [6-digit UPC/SKU] [opt. desc] [Size Unit]  (optional)
-
-    Section headers (ALL CAPS or Title Case, no code/price) are skipped.
-
-    Args:
-        lines: Reconstructed line dicts (from reconstruct_lines_from_words)
-        page_number: Page number for product metadata
-        source_file: Source PDF filename
-
-    Returns:
-        List of Product objects
-    """
-    products = []
-    i = 0
-
-    while i < len(lines):
-        line = lines[i]
-        line_words = line['words']
-
-        if not line_words:
-            i += 1
-            continue
-
-        first_word = line_words[0]['text']
-
-        # Check if this line starts a product (first word is OTC item code)
-        if not OTC_ITEM_CODE_PATTERN.match(first_word):
-            # Not a product start — skip (section header or stray line)
-            i += 1
-            continue
-
-        item_code = first_word  # e.g., "A1"
-
-        # Extract price from rightmost words if present
-        # OTC prices are "$XX" or "$X" (integer) — possibly split as "$16" or "$" + "16"
-        price_found = False
-        desc_words = []
-
-        for w in line_words[1:]:
-            if OTC_PRICE_PATTERN.match(w['text']):
-                price_found = True
-                # Skip price words from description
-                continue
-            # Also handle split price: "$" followed by number
-            if w['text'] == '$':
-                price_found = True
-                continue
-            if price_found and re.match(r'^\d+$', w['text']):
-                # This is the number part of a split price, skip it
-                continue
-            # Also skip "00" that follows dollar amount (e.g. "$16 00" format)
-            if w['text'] == '00' and price_found:
-                continue
-            desc_words.append(w['text'])
-
-        description_parts = desc_words
-        upc_sku = ''
-        pkg = ''
-        uom = ''
-
-        # Look ahead for continuation lines
-        j = i + 1
-        while j < len(lines):
-            next_line = lines[j]
-            next_words = next_line['words']
-
-            if not next_words:
-                j += 1
-                continue
-
-            next_first = next_words[0]['text']
-
-            # If next line starts with an OTC item code, it's a new product
-            if OTC_ITEM_CODE_PATTERN.match(next_first):
-                break
-
-            # If next line starts with a 5-6 digit SKU, it's the UPC/size line
-            if OTC_SKU_PATTERN.match(next_first):
-                upc_sku = next_first
-
-                # Remaining words on this line: description or size info
-                remaining = [w['text'] for w in next_words[1:]]
-
-                # Try to detect size/uom from the end of the line
-                # Pattern: last 1-2 words form "NUMBER UNIT" (e.g., "8 OZ", "100 CT")
-                if len(remaining) >= 2:
-                    potential_count = remaining[-2]
-                    potential_unit = remaining[-1]
-                    # Check if it matches a count/uom pattern
-                    combined = f"{potential_count} {potential_unit}"
-                    parsed_pkg, parsed_uom = parse_count_uom(combined)
-                    if parsed_uom:
-                        pkg = parsed_pkg
-                        uom = parsed_uom
-                        # Words before size are part of description
-                        description_parts.extend(remaining[:-2])
-                    else:
-                        # Try single last word as size (e.g., "16OZ")
-                        parsed_pkg, parsed_uom = parse_count_uom(remaining[-1])
-                        if parsed_uom:
-                            pkg = parsed_pkg
-                            uom = parsed_uom
-                            description_parts.extend(remaining[:-1])
-                        else:
-                            description_parts.extend(remaining)
-                elif len(remaining) == 1:
-                    # Single remaining word — could be size like "16OZ"
-                    parsed_pkg, parsed_uom = parse_count_uom(remaining[0])
-                    if parsed_uom:
-                        pkg = parsed_pkg
-                        uom = parsed_uom
-                    else:
-                        description_parts.extend(remaining)
-
-                j += 1
-                break  # UPC line is always last line of a product
-            else:
-                # Continuation description line — but skip section headers
-                line_text = next_line['text']
-                # Section header: ALL CAPS text with no item code or price
-                is_header = (
-                    re.match(r'^[A-Z][A-Z\s&,\-/]+$', line_text) and
-                    len(line_text) > 3 and
-                    not OTC_PRICE_PATTERN.search(line_text)
-                )
-                if is_header:
-                    j += 1
-                    break  # Section header ends current product context
-
-                # Add description words (skip price tokens)
-                for w in next_words:
-                    if not OTC_PRICE_PATTERN.match(w['text']) and w['text'] != '$' and w['text'] != '00':
-                        description_parts.append(w['text'])
-                j += 1
-
-        # Build item_no from code + UPC
-        combined_item_no = combine_identifiers(item_code, upc_sku, '')
-
-        product_name = clean_product_name(' '.join(description_parts))
-
-        products.append(Product(
-            product_name=product_name,
-            description='',
-            item_no=combined_item_no,
-            pkg=pkg,
-            uom=uom,
-            page_number=page_number,
-            source_file=source_file,
-            field_locations={
-                'item_no': FieldLocation(
-                    x0=0, y0=0, x1=0, y1=0,
-                    page_number=page_number,
-                    confidence=CONFIDENCE_MULTICOLUMN
-                ),
-            },
-        ))
-
-        i = j  # Advance past the lines consumed by this product
-
-    return products
-
-
-def parse_count_uom(count_str: str) -> tuple[str, str]:
-    """Parse count string like '32 ct.' into (pkg, uom) tuple.
-
-    Args:
-        count_str: String like "32 ct.", "100 pk", "16 oz", "1,000 ct.", "2,500/RL"
-
-    Returns:
-        Tuple of (package count, unit of measure)
-        Returns ('', count_str) if pattern doesn't match
-    """
-    if not count_str:
-        return '', ''
-
-    count_str = count_str.strip()
-
-    # Try standard count/uom pattern (e.g., "32 ct.", "100 pk")
-    match = COUNT_UOM_PATTERN.match(count_str)
-    if match:
-        # Remove commas from package count (e.g., "1,000" -> "1000")
-        pkg = match.group(1).replace(',', '')
-        return pkg, match.group(2).lower().rstrip('.')
-
-    # Try slash-separated format (e.g., "2,500/RL", "100/EACH")
-    slash_match = SLASH_UOM_PATTERN.match(count_str)
-    if slash_match:
-        pkg = slash_match.group(1).replace(',', '')
-        return pkg, slash_match.group(2).lower()
-
-    # Try to extract just a number if present
-    num_match = re.match(r'^([\d,]+)\s*(.*)$', count_str)
-    if num_match:
-        pkg = num_match.group(1).replace(',', '')
-        return pkg, num_match.group(2).strip().rstrip('.')
-
-    return '', count_str
-
-
-def is_valid_item_no(value: str) -> bool:
-    """Check if value looks like a valid item number.
-
-    Accepts:
-        - 4-5 digit numbers: 12345, 1234
-        - Alphanumeric codes: PMS989803150181, BJ100120
-        - Hyphenated codes: TTRS-42, VR-1234
-    """
-    if not value:
-        return False
-    return bool(ITEM_NO_PATTERN.match(value.strip()))
-
-
-def is_false_positive_item_no(value: str) -> bool:
-    """Check if value is a false positive - looks like item_no but is actually spec data.
-
-    Detects specification values commonly found in product brochures:
-        - Measurements: 75kg, 200cm, 10mm
-        - Dimensions: 200x85x203cm, 29x185cm
-        - Time values: 10Minutes, 5Hours
-        - Electrical: 12V, 220V, 5A
-        - Plain words without digits: "Nylon", "Black", "Analog Pump"
-        - And other spec patterns
-
-    Args:
-        value: The candidate item_no string
-
-    Returns:
-        True if this looks like specification data (false positive)
-    """
-    if not value:
-        return False
-
-    # Clean up the value - remove newlines, extra whitespace
-    cleaned = re.sub(r'\s+', '', value.strip())
-
-    for pattern in FALSE_POSITIVE_PATTERNS:
-        if pattern.match(cleaned):
-            return True
-
-    # Check for measurements embedded in text (20cmsidebolster, 100mmwidth)
-    if re.search(r'\d+(cm|mm|m|kg|g|L|ml)\w+', cleaned, re.IGNORECASE):
-        return True
-
-    # Check for long concatenated words that look like descriptions, not codes
-    # Real SKUs are typically short (< 20 chars) and use specific patterns
-    if len(cleaned) > 15 and re.match(r'^[A-Za-z]+\d+[A-Za-z]+', cleaned):
-        # Contains letters-digits-letters pattern and is long - likely concatenated description
-        return True
-
-    # Additional heuristic: if it contains newlines, likely a spec cell
-    if '\n' in value:
-        return True
-
-    # Real SKUs/item numbers almost always contain at least one digit
-    # Pure alphabetic values like "Nylon", "Black", "Analog Pump" are specs
-    if not any(c.isdigit() for c in cleaned):
-        return True
-
-    # Real item numbers rarely contain spaces - if it has multiple words, likely a description
-    # Exception: combined identifiers like "UPC / SKU" format
-    value_stripped = value.strip()
-    if ' ' in value_stripped and ' / ' not in value_stripped:
-        # Has spaces but isn't a combined identifier
-        # Check if it looks like a sentence/description (3+ words)
-        words = value_stripped.split()
-        if len(words) >= 3:
-            return True
-        # Check if it has lowercase words (descriptions often do, codes don't)
-        if any(w.islower() or (w[0].isupper() and w[1:].islower()) for w in words if len(w) > 1):
-            return True
-
-    return False
-
-
-def validate_product(product: 'Product') -> bool:
-    """Validate that a product looks like a real product, not spec data.
-
-    Args:
-        product: Product to validate
-
-    Returns:
-        True if product appears valid, False if it's likely a false positive
-    """
-    # Check if item_no is a false positive
-    if is_false_positive_item_no(product.item_no):
-        return False
-
-    # Check if product_name looks like a spec label (ends with :)
-    if product.product_name and product.product_name.strip().endswith(':'):
-        return False
-
-    # Check if product_name is too short (likely a spec label)
-    if product.product_name and len(product.product_name.strip()) < 3:
-        return False
-
-    return True
-
-
-def filter_valid_products(products: list['Product']) -> list['Product']:
-    """Filter out false positive products from extraction results.
-
-    Args:
-        products: List of extracted products
-
-    Returns:
-        Filtered list with false positives removed
-    """
-    return [p for p in products if validate_product(p)]
-
-
-def is_header_row(row: list[str]) -> bool:
-    """Check if row is a table header.
-
-    Requires at least 2 header-like cells to avoid false positives
-    on product rows that happen to contain words like "Description".
-    """
-    header_count = 0
-    non_empty_count = 0
-
-    for cell in row:
-        if not cell:
-            continue
-        non_empty_count += 1
-        for pattern in HEADER_PATTERNS:
-            if pattern.match(cell.strip()):
-                header_count += 1
-                break
-
-    # Require at least 2 header cells for larger rows
-    # For small rows (2-3 cells), require majority to be headers
-    if non_empty_count <= 3:
-        return header_count >= (non_empty_count // 2 + 1)  # Majority
-    return header_count >= 2
-
-
-def should_skip_row(row: list[str]) -> bool:
-    """Check if row should be skipped (footer, note, etc)."""
-    row_text = ' '.join(cell or '' for cell in row)
-    for pattern in SKIP_PATTERNS:
-        if pattern.search(row_text):
-            return True
-    return False
-
-
-def detect_column_mapping(table: list[list]) -> dict[str, int]:
-    """Detect column types based on header row patterns.
-
-    Returns a dict mapping field names to column indices:
-    - 'item_no': generic item number column
-    - 'sku': SKU column
-    - 'upc': UPC/barcode column
-    - 'product_name': product description column
-    - 'count': count/quantity column
-
-    Falls back to position-based detection if no headers found.
-    """
-    if not table:
-        return {}
-
-    mapping = {}
-
-    # Check first few rows for headers
-    for row_idx, row in enumerate(table[:3]):
-        row_strings = [_get_cell_text(cell) if not isinstance(cell, str) else cell for cell in row]
-
-        for col_idx, cell_text in enumerate(row_strings):
-            if not cell_text:
-                continue
-            cell_text = cell_text.strip()
-
-            # Check for identifier columns (upc, sku, item_no)
-            for field_name, patterns in IDENTIFIER_HEADER_PATTERNS.items():
-                for pattern in patterns:
-                    if pattern.match(cell_text):
-                        if field_name not in mapping:
-                            mapping[field_name] = col_idx
-                        break
-
-            # Check for product name column
-            for pattern in PRODUCT_NAME_HEADER_PATTERNS:
-                if pattern.match(cell_text):
-                    if 'product_name' not in mapping:
-                        mapping['product_name'] = col_idx
-                    break
-
-            # Check for count column
-            for pattern in COUNT_HEADER_PATTERNS:
-                if pattern.match(cell_text):
-                    if 'count' not in mapping:
-                        mapping['count'] = col_idx
-                    break
-
-    return mapping
-
-
-# Patterns for robust column detection (content-based)
-PRICE_PATTERN = re.compile(r'^\$[\d,]+\.?\d*$')
-NUMERIC_ONLY_PATTERN = re.compile(r'^[\d,]+$')
-
-
-def detect_columns_robust(table: list[list], sample_size: int = 10) -> dict[str, int]:
-    """Detect column types using multi-signal approach.
-
-    Uses multiple signals instead of just header matching:
-    1. Header text patterns (existing approach)
-    2. Content pattern matching - detect item_no, price, count patterns
-    3. Column width heuristics - narrow=code, wide=description
-    4. Cross-row consistency - same pattern across rows
-
-    Args:
-        table: List of rows (each row is a list of cells)
-        sample_size: Number of data rows to sample for pattern detection
-
-    Returns:
-        Dict mapping field names to column indices
-    """
-    if not table:
-        return {}
-
-    # First try header-based detection
-    header_mapping = detect_column_mapping(table)
-
-    # Get number of columns
-    num_cols = max(len(row) for row in table) if table else 0
-    if num_cols == 0:
-        return header_mapping
-
-    # Score columns by content patterns
-    col_scores: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    col_widths: dict[int, list[int]] = defaultdict(list)
-
-    # Skip header rows, sample data rows
-    data_rows = []
-    for row in table:
-        row_strings = [_get_cell_text(cell) if not isinstance(cell, str) else cell for cell in row]
-        if not is_header_row(row_strings):
-            data_rows.append(row)
-        if len(data_rows) >= sample_size:
-            break
-
-    for row in data_rows:
-        for col_idx in range(min(len(row), num_cols)):
-            cell = row[col_idx]
-            text = _get_cell_text(cell) if not isinstance(cell, str) else cell
-            text = text.strip() if text else ''
-
-            if not text:
-                continue
-
-            # Track column widths
-            col_widths[col_idx].append(len(text))
-
-            # Score by content patterns
-            # Item number patterns
-            if ITEM_NO_PATTERN.match(text):
-                col_scores[col_idx]['item_no'] += 1.0
-
-            # Price patterns ($xx.xx)
-            if PRICE_PATTERN.match(text):
-                col_scores[col_idx]['price'] += 1.0
-
-            # Count/UOM patterns (32 ct., 100 pk)
-            if COUNT_UOM_PATTERN.match(text) or COUNT_COLUMN_PATTERN.match(text):
-                col_scores[col_idx]['count'] += 1.0
-
-            # Product name heuristics: longer text, mixed case, no special patterns
-            if len(text) > 15 and not ITEM_NO_PATTERN.match(text) and not PRICE_PATTERN.match(text):
-                col_scores[col_idx]['product_name'] += 0.5
-
-            # Short alphanumeric codes (potential SKU/UPC)
-            if len(text) <= 15 and text.isalnum() and any(c.isdigit() for c in text):
-                if len(text) >= 10:  # UPC-like (10+ digits)
-                    col_scores[col_idx]['upc'] += 0.8
-                elif len(text) >= 4:  # SKU-like
-                    col_scores[col_idx]['sku'] += 0.5
-
-    # Calculate average column widths
-    avg_widths = {}
-    for col_idx, widths in col_widths.items():
-        avg_widths[col_idx] = sum(widths) / len(widths) if widths else 0
-
-    # Boost product_name score for wide columns
-    if avg_widths:
-        max_width = max(avg_widths.values())
-        for col_idx, width in avg_widths.items():
-            if width > max_width * 0.6:  # Column is relatively wide
-                col_scores[col_idx]['product_name'] += 0.5
-
-    # Assign columns by highest score, avoiding duplicates
-    result = dict(header_mapping)  # Start with header-based mapping
-    assigned_cols = set(result.values())
-
-    # For each field type, find best unassigned column
-    field_priority = ['item_no', 'upc', 'sku', 'product_name', 'count', 'price']
-
-    for field_name in field_priority:
-        if field_name in result:
-            continue
-
-        best_col = -1
-        best_score = 0.0
-
-        for col_idx in range(num_cols):
-            if col_idx in assigned_cols:
-                continue
-            score = col_scores[col_idx].get(field_name, 0)
-            if score > best_score:
-                best_score = score
-                best_col = col_idx
-
-        # Require minimum score threshold
-        if best_col >= 0 and best_score >= 0.5:
-            result[field_name] = best_col
-            assigned_cols.add(best_col)
-
-    return result
-
-
-def parse_markdown_tables(text: str) -> list[list[list[str]]]:
-    """Parse markdown tables from pymupdf4llm output.
-
-    Detects tables formatted with | separators:
-    | Header 1 | Header 2 |
-    |----------|----------|
-    | Cell 1   | Cell 2   |
-
-    Args:
-        text: Markdown text potentially containing tables
-
-    Returns:
-        List of tables, each table is a list of rows, each row is a list of cell strings
-    """
-    tables: list[list[list[str]]] = []
-    current_table: list[list[str]] = []
-    in_table = False
-
-    for line in text.split('\n'):
-        line = line.strip()
-
-        # Check if line looks like a table row
-        if '|' in line:
-            # Skip separator rows (|---|---|)
-            if re.match(r'^\|[\s\-:]+\|$', line) or re.match(r'^\|(\s*[-:]+\s*\|)+$', line):
-                in_table = True
-                continue
-
-            # Parse cells between pipes
-            # Handle both | cell | cell | and cell | cell formats
-            if line.startswith('|'):
-                cells = [c.strip() for c in line.split('|')[1:-1]]
-            else:
-                cells = [c.strip() for c in line.split('|')]
-
-            # Filter out empty rows
-            if cells and any(c for c in cells):
-                current_table.append(cells)
-                in_table = True
-        else:
-            # Non-table line - end current table if we were in one
-            if in_table and current_table:
-                # Only keep tables with at least 2 rows (header + data)
-                if len(current_table) >= 2:
-                    tables.append(current_table)
-                current_table = []
-                in_table = False
-
-    # Don't forget the last table
-    if current_table and len(current_table) >= 2:
-        tables.append(current_table)
-
-    return tables
-
-
-def _get_cell_text(cell) -> str:
-    """Get text from a cell, handling both string and dict formats."""
-    if isinstance(cell, dict):
-        return (cell.get('text') or '').strip()
-    return (cell or '').strip()
-
-
-def clean_product_name(name: str) -> str:
-    """Clean up product name text."""
-    if not name:
-        return ''
-    # Replace multiple spaces/newlines with single space
-    cleaned = re.sub(r'\s+', ' ', name.strip())
-    return cleaned
-
-
-def combine_identifiers(upc: str, sku: str, item_no: str) -> str:
-    """Combine identifiers with ' / ' separator. Priority: UPC > SKU > Item #.
-
-    Args:
-        upc: UPC/barcode value
-        sku: SKU value
-        item_no: Item number value
-
-    Returns:
-        Combined identifier string like "012345678901 / ABC123"
-    """
-    parts = []
-    if upc:
-        parts.append(upc.strip())
-    if sku:
-        sku_val = sku.strip()
-        if sku_val not in parts:
-            parts.append(sku_val)
-    if item_no:
-        item_val = item_no.strip()
-        if item_val not in parts:
-            parts.append(item_val)
-    return ' / '.join(parts) if parts else ''
-
-
-def find_count_column(table: list[list]) -> int:
-    """Find which column contains count data (e.g., '32 ct.', '1 pk').
-
-    Works with both string lists and dict lists (with 'text' and 'bbox' keys).
-
-    Returns the column index, or -1 if no valid count column found.
-    """
-    if not table:
-        return -1
-
-    # Check each column (skip first two: item#, description)
-    num_cols = max(len(row) for row in table) if table else 0
-
-    best_col = -1
-    best_match_rate = 0
-
-    for col_idx in range(2, num_cols):
-        count_matches = 0
-        total_cells = 0
-
-        for row in table:
-            if col_idx >= len(row):
-                continue
-            cell_text = _get_cell_text(row[col_idx])
-            if not cell_text:
-                continue
-            total_cells += 1
-            # Check if cell looks like a count (number + optional unit)
-            if COUNT_COLUMN_PATTERN.match(cell_text):
-                count_matches += 1
-
-        # Need at least 50% match rate and at least 1 matching cell
-        # For small tables (1-2 rows), require 100% match rate
-        if total_cells > 0 and count_matches >= 1:
-            match_rate = count_matches / total_cells
-            min_rate = 1.0 if total_cells <= 2 else 0.5
-            if match_rate >= min_rate and match_rate > best_match_rate:
-                best_match_rate = match_rate
-                best_col = col_idx
-
-    return best_col
-
-
-def _get_cell_bbox(cell) -> tuple | None:
-    """Get bbox from a cell, handling both string and dict formats."""
-    if isinstance(cell, dict):
-        return cell.get('bbox')
-    return None
-
-
-def extract_products_from_table(table: list[list], page_number: int, source_file: str,
-                                 use_robust_detection: bool = True) -> list[Product]:
-    """Extract products from a single table.
-
-    Supports multiple column formats:
-    - Item # | Description | Count | Price
-    - UPC | SKU | Description | Size | Price
-    - And other variations
-
-    Uses header detection to map columns, with optional robust content-based
-    detection as fallback.
-    Works with both string lists and dict lists (with 'text' and 'bbox' keys).
-
-    Args:
-        table: List of rows (each row is a list of cells)
-        page_number: Page number for product location
-        source_file: Source PDF filename
-        use_robust_detection: Use multi-signal column detection (default True)
-    """
-    products = []
-
-    # Detect column mapping - use robust detection if enabled
-    if use_robust_detection:
-        col_mapping = detect_columns_robust(table)
-    else:
-        col_mapping = detect_column_mapping(table)
-
-    # Determine which column contains count data (fallback detection)
-    count_col = col_mapping.get('count', -1)
-    if count_col < 0:
-        count_col = find_count_column(table)
-
-    # Convert row to string list for header/skip checks
-    def row_to_strings(row):
-        return [_get_cell_text(cell) for cell in row]
-
-    # Determine identifier columns - use mapping or fallback to position
-    # Priority: first valid identifier column found
-    id_cols = {}
-    if 'upc' in col_mapping:
-        id_cols['upc'] = col_mapping['upc']
-    if 'sku' in col_mapping:
-        id_cols['sku'] = col_mapping['sku']
-    if 'item_no' in col_mapping:
-        id_cols['item_no'] = col_mapping['item_no']
-
-    # Product name column
-    name_col = col_mapping.get('product_name', -1)
-
-    # If no column mapping found, use position-based fallback
-    use_positional = len(id_cols) == 0
-
-    for row in table:
-        row_strings = row_to_strings(row)
-
-        # Skip header and footer rows
-        if is_header_row(row_strings) or should_skip_row(row_strings):
-            continue
-
-        # Need at least 2 columns
-        if len(row) < 2:
-            continue
-
-        # Extract identifiers based on mapping
-        item_no = ''
-        sku = ''
-        upc = ''
-        field_locations = {}
-
-        if use_positional:
-            # Fallback: first column is identifier, second is product name
-            item_no = _get_cell_text(row[0])
-            if not is_valid_item_no(item_no):
-                continue
-            name_col = 1
-
-            # Set field location for item_no
-            item_bbox = _get_cell_bbox(row[0])
-            if item_bbox:
-                field_locations['item_no'] = FieldLocation(
-                    x0=item_bbox[0], y0=item_bbox[1],
-                    x1=item_bbox[2], y1=item_bbox[3],
-                    page_number=page_number,
-                    confidence=1.0
-                )
-        else:
-            # Use column mapping
-            has_valid_id = False
-
-            if 'upc' in id_cols and id_cols['upc'] < len(row):
-                upc = _get_cell_text(row[id_cols['upc']])
-                if upc:
-                    has_valid_id = True
-                    upc_bbox = _get_cell_bbox(row[id_cols['upc']])
-                    if upc_bbox:
-                        field_locations['upc'] = FieldLocation(
-                            x0=upc_bbox[0], y0=upc_bbox[1],
-                            x1=upc_bbox[2], y1=upc_bbox[3],
-                            page_number=page_number,
-                            confidence=1.0
-                        )
-
-            if 'sku' in id_cols and id_cols['sku'] < len(row):
-                sku = _get_cell_text(row[id_cols['sku']])
-                if sku:
-                    has_valid_id = True
-                    sku_bbox = _get_cell_bbox(row[id_cols['sku']])
-                    if sku_bbox:
-                        field_locations['sku'] = FieldLocation(
-                            x0=sku_bbox[0], y0=sku_bbox[1],
-                            x1=sku_bbox[2], y1=sku_bbox[3],
-                            page_number=page_number,
-                            confidence=1.0
-                        )
-
-            if 'item_no' in id_cols and id_cols['item_no'] < len(row):
-                item_no = _get_cell_text(row[id_cols['item_no']])
-                if item_no and is_valid_item_no(item_no):
-                    has_valid_id = True
-                    item_bbox = _get_cell_bbox(row[id_cols['item_no']])
-                    if item_bbox:
-                        field_locations['item_no'] = FieldLocation(
-                            x0=item_bbox[0], y0=item_bbox[1],
-                            x1=item_bbox[2], y1=item_bbox[3],
-                            page_number=page_number,
-                            confidence=1.0
-                        )
-
-            if not has_valid_id:
-                continue
-
-            # If no explicit product_name column, find the first text-like column
-            # that isn't an identifier or count column
-            if name_col < 0:
-                used_cols = set(id_cols.values())
-                if count_col >= 0:
-                    used_cols.add(count_col)
-                for idx in range(len(row)):
-                    if idx not in used_cols:
-                        cell_text = _get_cell_text(row[idx])
-                        # Skip if looks like a price
-                        if cell_text and not cell_text.startswith('$'):
-                            name_col = idx
-                            break
-
-        # Extract product name
-        product_name = ''
-        if name_col >= 0 and name_col < len(row):
-            product_name = clean_product_name(_get_cell_text(row[name_col]))
-            name_bbox = _get_cell_bbox(row[name_col])
-            if name_bbox:
-                field_locations['product_name'] = FieldLocation(
-                    x0=name_bbox[0], y0=name_bbox[1],
-                    x1=name_bbox[2], y1=name_bbox[3],
-                    page_number=page_number,
-                    confidence=1.0
-                )
-
-        if not product_name:
-            continue
-
-        # Extract count/uom from detected count column
-        count_str = ''
-        count_bbox = None
-        if count_col >= 0 and count_col < len(row):
-            count_str = _get_cell_text(row[count_col])
-            count_bbox = _get_cell_bbox(row[count_col])
-
-        pkg, uom = parse_count_uom(count_str)
-
-        # Add count field locations
-        if count_bbox:
-            count_location = FieldLocation(
-                x0=count_bbox[0], y0=count_bbox[1],
-                x1=count_bbox[2], y1=count_bbox[3],
-                page_number=page_number,
-                confidence=1.0
-            )
-            if pkg:
-                field_locations['pkg'] = count_location
-            if uom:
-                field_locations['uom'] = count_location
-
-        # Combine identifiers into single item_no field
-        combined_item_no = combine_identifiers(upc, sku, item_no)
-
-        # Create product with combined identifier
-        products.append(Product(
-            product_name=product_name,
-            description='',
-            item_no=combined_item_no,
-            pkg=pkg,
-            uom=uom,
-            page_number=page_number,
-            source_file=source_file,
-            field_locations=field_locations,
-        ))
-
-    return products
 
 
 def extract_products_from_text_fallback(page: PageContent, source_file: str) -> list[Product]:
@@ -1649,10 +456,10 @@ class AutoExtractor:
         """Extract using pipeline: try methods in order, stop when good results found.
 
         Uses PDF classification to select optimal method order:
-        - Digital + Bordered: Camelot → pdfplumber → PyMuPDF → pdfminer → regex
-        - Digital + Borderless: img2table → pdfplumber → Docling → pymupdf4llm → regex
-        - Scanned: Docling → unstructured
-        - Text-only: pymupdf4llm → pdfminer → regex
+        - Digital + Bordered: Camelot -> pdfplumber -> PyMuPDF -> pdfminer -> regex
+        - Digital + Borderless: img2table -> pdfplumber -> Docling -> pymupdf4llm -> regex
+        - Scanned: Docling -> unstructured
+        - Text-only: pymupdf4llm -> pdfminer -> regex
 
         Stops early if a method finds products with sufficient confidence.
         Falls back to merging all results if no single method is good enough.
@@ -1664,7 +471,6 @@ class AutoExtractor:
         if self._multicolumn_detected is None:
             self._multicolumn_detected = False
             # Sample up to 15 pages to find one with multi-column layout
-            # (skips cover pages, TOC, intros, etc.)
             for sample_page in range(1, min(reader.total_pages + 1, 16)):
                 words = reader.extract_words(sample_page)
                 if len(words) < 20:
@@ -1686,13 +492,11 @@ class AutoExtractor:
 
         # Select pipeline order based on PDF characteristics
         if pdf_info['is_scanned']:
-            # Scanned documents - use AI/vision methods
             pipeline_methods = [
                 ('docling', self._try_docling, DOCLING_AVAILABLE),
                 ('unstructured', self._try_unstructured, UNSTRUCTURED_AVAILABLE),
             ]
         elif pdf_info['has_borders']:
-            # Digital PDF with bordered tables
             pipeline_methods = [
                 ('camelot', self._try_camelot, CAMELOT_AVAILABLE),
                 ('pdfplumber', self._try_pdfplumber_tables, True),
@@ -1700,7 +504,6 @@ class AutoExtractor:
                 ('pdfminer', self._try_pdfminer_layout, True),
             ]
         elif pdf_info['layout_type'] == 'borderless':
-            # Borderless tables
             pipeline_methods = [
                 ('img2table', self._try_img2table, IMG2TABLE_AVAILABLE),
                 ('pdfplumber', self._try_pdfplumber_tables, True),
@@ -1708,13 +511,11 @@ class AutoExtractor:
                 ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
             ]
         elif pdf_info['layout_type'] == 'text-only':
-            # Text-only documents
             pipeline_methods = [
                 ('pymupdf4llm', self._try_pymupdf4llm, PYMUPDF4LLM_AVAILABLE),
                 ('pdfminer', self._try_pdfminer_layout, True),
             ]
         else:
-            # Default: try all methods in confidence order
             pipeline_methods = [
                 ('camelot', self._try_camelot, CAMELOT_AVAILABLE),
                 ('docling', self._try_docling, DOCLING_AVAILABLE),
@@ -1763,7 +564,6 @@ class AutoExtractor:
             all_product_lists = [products for _, products in all_results if products]
             if all_product_lists:
                 merged = self._merge_extractions(*all_product_lists)
-                # Filter merged results too
                 merged = filter_valid_products(merged)
                 if merged:
                     self.pipeline_stats['merged'] += 1
@@ -1772,7 +572,6 @@ class AutoExtractor:
         # Last resort: regex fallback on raw text
         page_content = reader.get_page(page_num)
         fallback_products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
-        # Filter fallback results
         fallback_products = filter_valid_products(fallback_products)
         if fallback_products:
             self.pipeline_stats['regex_fallback'] += 1
@@ -1798,12 +597,7 @@ class AutoExtractor:
         return total_confidence / count if count > 0 else 0.0
 
     def _try_multicolumn(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Try multi-column word-level extraction for OTC-style catalogs.
-
-        Extracts words with positions, detects two-column layout, splits into
-        columns, reconstructs lines, and parses multi-line products.
-        Falls back to single-column parsing when this page has codes on one side only.
-        """
+        """Try multi-column word-level extraction for OTC-style catalogs."""
         words = reader.extract_words(page_num)
         if not words:
             return []
@@ -1813,7 +607,6 @@ class AutoExtractor:
         boundary = detect_multicolumn_layout(words, page_width)
 
         if boundary is not None:
-            # Two-column layout detected on this page
             left_words, right_words = split_words_into_columns(words, boundary)
             products = []
             for col_words in (left_words, right_words):
@@ -1827,7 +620,6 @@ class AutoExtractor:
             return filter_valid_products(products)
 
         # No two-column layout on this page, but multicolumn was detected globally.
-        # Try single-column parsing (e.g. last page with only left column).
         has_otc_codes = any(OTC_ITEM_CODE_PATTERN.match(w['text']) for w in words)
         if has_otc_codes:
             all_lines = reconstruct_lines_from_words(words)
@@ -1850,7 +642,6 @@ class AutoExtractor:
             extracted = extract_products_from_table(
                 table_data['rows'], page_num, self.pdf_path.name
             )
-            # Update confidence to Docling level
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_DOCLING
@@ -1870,7 +661,6 @@ class AutoExtractor:
             extracted = extract_products_from_table(
                 table_data['rows'], page_num, self.pdf_path.name
             )
-            # Update confidence to Camelot level
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_CAMELOT
@@ -1879,7 +669,7 @@ class AutoExtractor:
         return products
 
     def _try_unstructured(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Try extraction using unstructured.io - document understanding with layout analysis."""
+        """Try extraction using unstructured.io."""
         if not UNSTRUCTURED_AVAILABLE:
             return []
 
@@ -1890,7 +680,6 @@ class AutoExtractor:
             extracted = extract_products_from_table(
                 table_data['rows'], page_num, self.pdf_path.name
             )
-            # Update confidence to unstructured level
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_UNSTRUCTURED
@@ -1910,7 +699,6 @@ class AutoExtractor:
             extracted = extract_products_from_table(
                 table_data['rows'], page_num, self.pdf_path.name
             )
-            # Update confidence to PyMuPDF level
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_PYMUPDF
@@ -1930,7 +718,6 @@ class AutoExtractor:
             extracted = extract_products_from_table(
                 table_data['rows'], page_num, self.pdf_path.name
             )
-            # Update confidence to img2table level
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_IMG2TABLE
@@ -1939,11 +726,7 @@ class AutoExtractor:
         return products
 
     def _try_pymupdf4llm(self, reader: PDFReader, page_num: int) -> list[Product]:
-        """Try extraction using pymupdf4llm - layout-aware markdown text.
-
-        First attempts to parse markdown tables, then falls back to regex
-        extraction on the text content.
-        """
+        """Try extraction using pymupdf4llm - layout-aware markdown text."""
         if not PYMUPDF4LLM_AVAILABLE:
             return []
 
@@ -1957,12 +740,10 @@ class AutoExtractor:
         md_tables = parse_markdown_tables(markdown_text)
         if md_tables:
             for table in md_tables:
-                # Convert string table to expected format
                 table_rows = [[{'text': cell, 'bbox': None} for cell in row] for row in table]
                 extracted = extract_products_from_table(
                     table_rows, page_num, self.pdf_path.name
                 )
-                # Update confidence to pymupdf4llm level
                 for product in extracted:
                     for location in product.field_locations.values():
                         location.confidence = CONFIDENCE_PYMUPDF4LLM
@@ -1970,19 +751,14 @@ class AutoExtractor:
 
         # If no products from tables, try regex extraction
         if not products:
-            # Convert markdown to lines for regex extraction
             lines = [line.strip() for line in markdown_text.split('\n') if line.strip()]
-
-            # Create a synthetic PageContent for the fallback extractor
             page_content = PageContent(
                 page_number=page_num,
                 lines=lines,
                 raw_text=markdown_text
             )
-
             products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
 
-            # Update confidence for pymupdf4llm extraction
             for product in products:
                 for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
                     if field_name not in product.field_locations:
@@ -2005,7 +781,6 @@ class AutoExtractor:
             extracted = extract_products_from_table(
                 table_data['rows'], page_num, self.pdf_path.name
             )
-            # Update confidence to pdfplumber level
             for product in extracted:
                 for field_name, location in product.field_locations.items():
                     location.confidence = CONFIDENCE_PDFPLUMBER
@@ -2017,13 +792,11 @@ class AutoExtractor:
         """Try extraction using pdfminer.six layout analysis."""
         text_blocks = reader.extract_text_with_layout(page_num)
 
-        # Convert text blocks to lines for regex extraction
         all_lines = []
         for block in text_blocks:
             for line_data in block.get('lines', []):
                 all_lines.append(line_data['text'])
 
-        # Create a synthetic PageContent for the fallback extractor
         page_content = PageContent(
             page_number=page_num,
             lines=all_lines,
@@ -2032,10 +805,6 @@ class AutoExtractor:
 
         products = extract_products_from_text_fallback(page_content, self.pdf_path.name)
 
-        # Update confidence for pdfminer extraction
-        # Note: Position data from pdfminer is not used since regex fallback
-        # doesn't track which text corresponds to which field
-        # Only set confidence if no existing location or if existing has lower confidence
         for product in products:
             for field_name in ['item_no', 'product_name', 'description', 'pkg', 'uom']:
                 if field_name not in product.field_locations:
@@ -2045,21 +814,12 @@ class AutoExtractor:
                         confidence=CONFIDENCE_PDFMINER
                     )
                 elif product.field_locations[field_name].confidence < CONFIDENCE_PDFMINER:
-                    # Update if existing confidence is lower
                     product.field_locations[field_name].confidence = CONFIDENCE_PDFMINER
-                # else: keep existing higher confidence
 
         return products
 
     def _merge_extractions(self, *product_lists: list[Product]) -> list[Product]:
-        """Merge products from multiple extractors.
-
-        Strategy:
-        - Match products by item_no AND page_number (same product on same page)
-        - For each field, pick highest confidence value
-        - Combine field_locations from best sources
-        """
-        # Group products by (item_no, page_number) to avoid merging products from different pages
+        """Merge products from multiple extractors."""
         by_key: dict[tuple[str, int], list[Product]] = defaultdict(list)
 
         for product_list in product_lists:
@@ -2072,11 +832,9 @@ class AutoExtractor:
 
         for (item_no, page_num), products in by_key.items():
             if len(products) == 1:
-                # Only one extraction found this product
                 merged_products.append(products[0])
                 continue
 
-            # Multiple extractions - merge them
             merged = self._merge_product_variants(products)
             if merged:
                 merged_products.append(merged)
@@ -2088,21 +846,18 @@ class AutoExtractor:
         if not products:
             return None
 
-        # Start with the first product as base
         base = products[0]
 
-        # For product_name: pick longest non-empty value (captures full name)
+        # For product_name: pick longest non-empty value
         best_name = base.product_name
         for p in products[1:]:
             if p.product_name and len(p.product_name) > len(best_name):
                 best_name = p.product_name
 
-        # For other fields: pick from highest confidence source
         def get_field_confidence(product: Product, field: str) -> float:
             loc = product.field_locations.get(field)
             return loc.confidence if loc else 0.0
 
-        # Find best description
         best_desc = base.description
         best_desc_conf = get_field_confidence(base, 'description')
         for p in products[1:]:
@@ -2111,7 +866,6 @@ class AutoExtractor:
                 best_desc = p.description
                 best_desc_conf = conf
 
-        # Find best pkg
         best_pkg = base.pkg
         best_pkg_conf = get_field_confidence(base, 'pkg')
         for p in products[1:]:
@@ -2120,7 +874,6 @@ class AutoExtractor:
                 best_pkg = p.pkg
                 best_pkg_conf = conf
 
-        # Find best uom
         best_uom = base.uom
         best_uom_conf = get_field_confidence(base, 'uom')
         for p in products[1:]:

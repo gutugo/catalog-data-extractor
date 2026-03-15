@@ -18,26 +18,33 @@ class ExtractionWarning:
 
     Thread-safe implementation using a lock for concurrent access.
     """
-    _warnings: list[str] = []
+    _warnings: list[str] | None = None
     _lock = threading.Lock()
+
+    @classmethod
+    def _ensure_init(cls):
+        if cls._warnings is None:
+            cls._warnings = []
 
     @classmethod
     def add(cls, message: str):
         """Add a warning message (thread-safe)."""
         with cls._lock:
+            cls._ensure_init()
             cls._warnings.append(message)
 
     @classmethod
     def get_all(cls) -> list[str]:
         """Get all warning messages (thread-safe)."""
         with cls._lock:
+            cls._ensure_init()
             return cls._warnings.copy()
 
     @classmethod
     def clear(cls):
         """Clear all warnings (thread-safe)."""
         with cls._lock:
-            cls._warnings.clear()
+            cls._warnings = []
 
 # Camelot is optional - only imported when needed
 try:

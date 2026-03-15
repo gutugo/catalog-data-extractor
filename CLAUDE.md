@@ -8,17 +8,54 @@ Catalog Data Extractor - Extracts product data from PDF supplier catalogs using 
 
 ```
 src/extractor/
-  auto_extractor.py     # Smart pipeline extraction
+  auto_extractor.py     # Pipeline orchestrator + text fallback extraction
+  patterns.py           # Regex patterns and confidence constants
+  parsing_utils.py      # Shared parsing utilities (count/UOM, item validation)
+  product_validation.py # False-positive filtering
+  multicolumn.py        # Two-column OTC layout detection and parsing
+  column_detection.py   # Column mapping and table-to-product extraction
   pdf_reader.py         # PDF reading and table extraction methods
   web_verifier.py       # Flask web UI (port 5001)
   data_model.py         # Product/Session data models
   cli.py                # CLI commands
+  exporter.py           # CSV export
+  extractor.py          # Interactive (manual) extraction workflow
   templates/            # HTML templates
+tests/
+  conftest.py           # Shared fixtures
+  test_data_model.py    # Product, Session, FieldLocation, PageContent tests
+  test_patterns.py      # Regex pattern tests
+  test_parsing_utils.py # Parsing utility tests
+  test_product_validation.py # Validation/filtering tests
+  test_multicolumn.py   # Multi-column layout tests
+  test_column_detection.py   # Column mapping and table extraction tests
+  test_auto_extractor.py     # Pipeline orchestrator tests
+  test_web_verifier.py       # Flask API endpoint tests
+  test_cli.py                # CLI helper tests
+  test_exporter.py           # CSV export tests
 catalogs/               # Input PDF files
 processed/
   sessions/             # Extraction sessions (.session.json)
   extractions/          # Output CSV files
 ```
+
+## Module Architecture
+
+The extraction logic is split into focused modules with a clear dependency DAG (no circular imports):
+
+```
+patterns.py              (no internal deps)
+    ↑
+parsing_utils.py         (imports patterns)
+    ↑
+product_validation.py    (imports patterns)
+multicolumn.py           (imports patterns, parsing_utils, data_model)
+column_detection.py      (imports patterns, parsing_utils, data_model)
+    ↑
+auto_extractor.py        (imports all above + pdf_reader, re-exports everything)
+```
+
+`auto_extractor.py` re-exports all public names from submodules for backward compatibility. Code that imports from `auto_extractor` (e.g., `from extractor.auto_extractor import extract_products_from_table`) continues to work unchanged.
 
 ## Extraction
 
@@ -111,16 +148,18 @@ fetch('/api/extract/catalog-name', {
 
 ## Column Detection
 
-Uses multi-signal approach for robust column mapping:
+Defined in `column_detection.py`. Uses multi-signal approach for robust column mapping:
 
 1. **Header patterns** - Matches column headers ("Item #", "Description", etc.)
 2. **Content patterns** - Detects item_no, price, count patterns in cell data
 3. **Column width heuristics** - Narrow columns often contain codes, wide columns contain descriptions
 4. **Cross-row consistency** - Same pattern across multiple rows indicates field type
 
+Key functions: `detect_column_mapping()`, `detect_columns_robust()`, `find_count_column()`, `extract_products_from_table()`
+
 ## Product Validation
 
-Filters out false positives from brochure-style catalogs that have specification tables instead of product listings. Rejects:
+Defined in `product_validation.py`. Filters out false positives from brochure-style catalogs that have specification tables instead of product listings. Rejects:
 
 - **Measurements**: 75kg, 200cm, 10mm, dimensions (200x85cm)
 - **Electrical specs**: 12V, 220V, 50Hz, IPX4 ratings
@@ -133,7 +172,7 @@ Filters out false positives from brochure-style catalogs that have specification
 
 ## Multi-Column Extraction
 
-Handles two-column, multi-line product layouts (e.g., AETNA OTC catalogs) that break standard table extractors.
+Defined in `multicolumn.py`. Handles two-column, multi-line product layouts (e.g., AETNA OTC catalogs) that break standard table extractors.
 
 ### How It Works
 
@@ -155,14 +194,35 @@ Handles two-column, multi-line product layouts (e.g., AETNA OTC catalogs) that b
 
 ### Key Functions
 
-| Function | Purpose |
-|----------|---------|
-| `detect_column_gaps()` | Histogram-based vertical gap detection |
-| `split_words_into_columns()` | Assign words to left/right columns |
-| `reconstruct_lines_from_words()` | Group words into lines by y-position |
-| `detect_multicolumn_layout()` | Verify two-column OTC layout |
-| `parse_multicolumn_products()` | Parse multi-line products within a column |
-| `AutoExtractor._try_multicolumn()` | Pipeline method with single-column fallback |
+| Function | Module | Purpose |
+|----------|--------|---------|
+| `detect_column_gaps()` | `multicolumn.py` | Histogram-based vertical gap detection |
+| `split_words_into_columns()` | `multicolumn.py` | Assign words to left/right columns |
+| `reconstruct_lines_from_words()` | `multicolumn.py` | Group words into lines by y-position |
+| `detect_multicolumn_layout()` | `multicolumn.py` | Verify two-column OTC layout |
+| `parse_multicolumn_products()` | `multicolumn.py` | Parse multi-line products within a column |
+| `AutoExtractor._try_multicolumn()` | `auto_extractor.py` | Pipeline method with single-column fallback |
+
+## Patterns and Constants
+
+Defined in `patterns.py`. All regex patterns and confidence constants live here as the single source of truth. Other modules import from this file. Key patterns:
+
+- `ITEM_NO_PATTERN` — Validates item numbers (4-5 digit, alphanumeric, hyphenated)
+- `UOM_UNITS` — Raw string of all recognized unit abbreviations
+- `COUNT_UOM_PATTERN` — Parses "32 ct.", "100 pk" etc.
+- `FALSE_POSITIVE_PATTERNS` — Detects spec data masquerading as products
+- `OTC_*_PATTERN` — OTC catalog-specific patterns (item codes, SKUs, prices)
+- `HEADER_PATTERNS`, `SKIP_PATTERNS` — Table header/footer detection
+
+## Parsing Utilities
+
+Defined in `parsing_utils.py`. Shared functions used by multiple extraction modules:
+
+- `parse_count_uom(count_str)` — Parses "32 ct." → ("32", "ct")
+- `is_valid_item_no(value)` — Validates item number format
+- `clean_product_name(name)` — Normalizes whitespace
+- `combine_identifiers(upc, sku, item_no)` — Joins with " / " separator
+- `parse_markdown_tables(text)` — Extracts tables from markdown text
 
 ## Docling (IBM AI Extraction)
 
@@ -175,6 +235,26 @@ Handles two-column, multi-line product layouts (e.g., AETNA OTC catalogs) that b
 - Processes **entire PDF at once**, caches result
 - First run is slow (model download + full PDF conversion)
 - Progress shows 0% until full document is processed
+
+## Testing
+
+255 tests using pytest. Run with:
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run with coverage
+uv run pytest --cov=extractor --cov-report=term-missing
+
+# Run a specific test file
+uv run pytest tests/test_patterns.py -v
+
+# Run a specific test class
+uv run pytest tests/test_data_model.py::TestProduct -v
+```
+
+Test configuration is in `pyproject.toml` (`[tool.pytest.ini_options]`).
 
 ## Common Commands
 
@@ -197,19 +277,25 @@ uv run extractor export catalog-name
 ## Dependencies
 
 **Core (always available):**
-- pdfplumber, pdfminer.six, flask, rich, typer, pandas
+- pdfplumber, pdfminer.six, flask, rich, typer, pandas, pymupdf, pymupdf4llm
 
 **Optional (for better accuracy):**
 - camelot-py (requires system ghostscript)
 - docling (downloads ~500MB AI models)
 - unstructured[pdf] (document understanding)
-- pymupdf (fast native tables)
 - img2table
-- pymupdf4llm
+
+**Dev:**
+- pytest, pytest-cov
 
 Install optional:
 ```bash
-uv pip install docling img2table pymupdf4llm pymupdf "unstructured[pdf]"
+uv pip install docling img2table "unstructured[pdf]"
+```
+
+Install dev:
+```bash
+uv pip install pytest pytest-cov
 ```
 
 ## Troubleshooting

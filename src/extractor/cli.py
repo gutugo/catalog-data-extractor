@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import socket
+import threading
+import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -43,6 +46,25 @@ def _validate_source_file_path(source_file: str, base_dir: Path) -> Path | None:
         return None
 
     return candidate
+def _is_port_available(host: str, port: int) -> bool:
+    """Check if a port is available for binding."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, port))
+            return True
+    except OSError:
+        return False
+
+
+def _open_browser_delayed(host: str, port: int, delay: float = 1.0) -> None:
+    """Open browser after a short delay."""
+    def _open():
+        webbrowser.open(f"http://{host}:{port}")
+    timer = threading.Timer(delay, _open)
+    timer.daemon = True
+    timer.start()
+
+
 # web_verifier imported lazily in web_verify command to avoid Flask dependency for other commands
 
 app = typer.Typer(
@@ -371,6 +393,11 @@ def web_verify(
         console.print("[dim]Install with: uv add flask pymupdf[/dim]")
         raise typer.Exit(1)
 
+    # Check port availability (shared for both modes)
+    if not _is_port_available(host, port):
+        console.print(f"[red]Error:[/red] Port {port} is already in use. Try a different port with --port.")
+        raise typer.Exit(1)
+
     # Dashboard mode - no catalog specified
     if catalog_name is None:
         console.print(Panel(
@@ -379,33 +406,7 @@ def web_verify(
             border_style="blue"
         ))
 
-        # Check if port is available before trying to open browser
-        import socket
-        import webbrowser
-        import threading
-
-        def is_port_available(host: str, port: int) -> bool:
-            """Check if a port is available for binding."""
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind((host, port))
-                    return True
-            except OSError:
-                return False
-
-        if not is_port_available(host, port):
-            console.print(f"[red]Error:[/red] Port {port} is already in use. Try a different port with --port.")
-            raise typer.Exit(1)
-
-        def open_browser():
-            webbrowser.open(f"http://{host}:{port}")
-
-        # Open browser after a short delay (port was verified available)
-        timer = threading.Timer(1.0, open_browser)
-        timer.daemon = True  # Don't block process exit
-        timer.start()
-
-        # Run the web server in dashboard mode
+        _open_browser_delayed(host, port)
         run_web_verifier(host=host, port=port, dashboard_mode=True)
         return
 
@@ -439,33 +440,7 @@ def web_verify(
         border_style="blue"
     ))
 
-    # Check if port is available before trying to open browser
-    import socket
-    import webbrowser
-    import threading
-
-    def is_port_available(host: str, port: int) -> bool:
-        """Check if a port is available for binding."""
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((host, port))
-                return True
-        except OSError:
-            return False
-
-    if not is_port_available(host, port):
-        console.print(f"[red]Error:[/red] Port {port} is already in use. Try a different port with --port.")
-        raise typer.Exit(1)
-
-    def open_browser():
-        webbrowser.open(f"http://{host}:{port}")
-
-    # Open browser after a short delay (port was verified available)
-    timer = threading.Timer(1.0, open_browser)
-    timer.daemon = True  # Don't block process exit
-    timer.start()
-
-    # Run the web server
+    _open_browser_delayed(host, port)
     run_web_verifier(pdf_path, session, SESSIONS_DIR, host=host, port=port)
 
 
