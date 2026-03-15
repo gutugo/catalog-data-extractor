@@ -1,13 +1,13 @@
 """Tests for auto_extractor.py."""
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 from pathlib import Path
-from collections import defaultdict
 
 from extractor.auto_extractor import (
     AutoExtractor,
     extract_products_from_text_fallback,
 )
+from extractor.glm_ocr import GlmOcrClient, GlmOcrError
 from extractor.data_model import Product, ExtractionSession, PageContent, FieldLocation
 
 
@@ -74,7 +74,6 @@ class TestExtractProductsFromTextFallback:
             raw_text="CLEANING SUPPLIES\n12345 Mop 1 ct. $5.99",
         )
         products = extract_products_from_text_fallback(page, "test.pdf")
-        # Section header should not become product name prefix
         assert len(products) == 1
         assert "CLEANING SUPPLIES" not in products[0].product_name
 
@@ -100,7 +99,7 @@ class TestAutoExtractorInit:
         assert ext.pdf_path == Path("test.pdf")
         assert ext.session_dir == tmp_path
         assert ext.empty_pages == []
-        assert ext._multicolumn_detected is None
+        assert isinstance(ext._glm_client, GlmOcrClient)
 
 
 class TestCalculateAvgConfidence:
@@ -131,61 +130,3 @@ class TestCalculateAvgConfidence:
             }),
         ]
         assert ext._calculate_avg_confidence(products) == 0.9
-
-
-class TestMergeProductVariants:
-    def test_picks_longest_name(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        products = [
-            Product(product_name="Widget", item_no="123", page_number=1),
-            Product(product_name="Widget Pro Max", item_no="123", page_number=1),
-        ]
-        merged = ext._merge_product_variants(products)
-        assert merged.product_name == "Widget Pro Max"
-
-    def test_empty_list(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        assert ext._merge_product_variants([]) is None
-
-    def test_single_product(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        p = Product(product_name="Widget", item_no="123")
-        # _merge_product_variants uses first product as base
-        merged = ext._merge_product_variants([p])
-        assert merged.product_name == "Widget"
-
-    def test_highest_confidence_fields(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        products = [
-            Product(product_name="A", item_no="123", pkg="10", page_number=1, field_locations={
-                'pkg': FieldLocation(0, 0, 1, 1, 1, confidence=0.5),
-            }),
-            Product(product_name="A", item_no="123", pkg="20", page_number=1, field_locations={
-                'pkg': FieldLocation(0, 0, 1, 1, 1, confidence=0.9),
-            }),
-        ]
-        merged = ext._merge_product_variants(products)
-        assert merged.pkg == "20"
-
-
-class TestMergeExtractions:
-    def test_single_list(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        products = [Product(product_name="A", item_no="123", page_number=1)]
-        merged = ext._merge_extractions(products)
-        assert len(merged) == 1
-
-    def test_merges_same_product(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        list1 = [Product(product_name="Widget", item_no="123", page_number=1)]
-        list2 = [Product(product_name="Widget Pro Max", item_no="123", page_number=1)]
-        merged = ext._merge_extractions(list1, list2)
-        assert len(merged) == 1
-        assert merged[0].product_name == "Widget Pro Max"
-
-    def test_different_pages_not_merged(self, tmp_path):
-        ext = AutoExtractor(Path("test.pdf"), tmp_path)
-        list1 = [Product(product_name="A", item_no="123", page_number=1)]
-        list2 = [Product(product_name="A", item_no="123", page_number=2)]
-        merged = ext._merge_extractions(list1, list2)
-        assert len(merged) == 2

@@ -1046,6 +1046,41 @@ class PDFReader:
             return []
 
 
+    def render_page_to_png(self, page_number: int, zoom: float = 2.0) -> bytes:
+        """Render a PDF page to PNG bytes using PyMuPDF.
+
+        Args:
+            page_number: 1-indexed page number
+            zoom: Zoom factor for resolution (2.0 = 144 DPI, good for OCR)
+
+        Returns:
+            PNG image as bytes, or empty bytes on failure
+        """
+        if not PYMUPDF_AVAILABLE:
+            ExtractionWarning.add("PyMuPDF not available for page rendering")
+            return b""
+
+        if not self._pdf:
+            raise RuntimeError("PDF not opened. Use context manager.")
+
+        if page_number < 1 or page_number > self.total_pages:
+            raise ValueError(f"Page {page_number} out of range (1-{self.total_pages})")
+
+        try:
+            with pymupdf.open(str(self.pdf_path)) as doc:
+                page = doc[page_number - 1]
+                mat = pymupdf.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+                png_bytes = pix.tobytes("png")
+                del pix
+                return png_bytes
+        except Exception as e:
+            warning_msg = f"Failed to render page {page_number}: {e}"
+            print(f"Warning: {warning_msg}", file=sys.stderr)
+            ExtractionWarning.add(warning_msg)
+            return b""
+
+
 def quick_page_count(pdf_path: Path) -> int:
     """Get page count without keeping PDF open."""
     with pdfplumber.open(pdf_path) as pdf:

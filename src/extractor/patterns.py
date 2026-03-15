@@ -3,6 +3,7 @@
 import re
 
 # Confidence scores for different extraction methods
+CONFIDENCE_GLM_OCR = 0.97       # High - GLM-OCR visual table/text recognition
 CONFIDENCE_DOCLING = 0.98
 CONFIDENCE_CAMELOT = 1.0
 CONFIDENCE_UNSTRUCTURED = 0.92

@@ -8,13 +8,14 @@ Catalog Data Extractor - Extracts product data from PDF supplier catalogs using 
 
 ```
 src/extractor/
-  auto_extractor.py     # Pipeline orchestrator + text fallback extraction
+  auto_extractor.py     # GLM-OCR pipeline orchestrator + text fallback
+  glm_ocr.py            # GLM-OCR client via Ollama HTTP API
   patterns.py           # Regex patterns and confidence constants
   parsing_utils.py      # Shared parsing utilities (count/UOM, item validation)
   product_validation.py # False-positive filtering
   multicolumn.py        # Two-column OTC layout detection and parsing
   column_detection.py   # Column mapping and table-to-product extraction
-  pdf_reader.py         # PDF reading and table extraction methods
+  pdf_reader.py         # PDF reading, table extraction, page rendering
   web_verifier.py       # Flask web UI (port 5001)
   data_model.py         # Product/Session data models
   cli.py                # CLI commands
@@ -30,6 +31,7 @@ tests/
   test_multicolumn.py   # Multi-column layout tests
   test_column_detection.py   # Column mapping and table extraction tests
   test_auto_extractor.py     # Pipeline orchestrator tests
+  test_glm_ocr.py            # GLM-OCR client and integration tests
   test_web_verifier.py       # Flask API endpoint tests
   test_cli.py                # CLI helper tests
   test_exporter.py           # CSV export tests
@@ -59,52 +61,48 @@ auto_extractor.py        (imports all above + pdf_reader, re-exports everything)
 
 ## Extraction
 
-The extractor automatically classifies PDFs and selects the best extraction methods based on document characteristics. No user configuration needed.
+The extractor uses **GLM-OCR** (via Ollama) as the sole extraction method. Each page is rendered to a PNG image, sent to the GLM-OCR model for table recognition, and the returned markdown is parsed into Product objects.
 
 ### How It Works
 
-1. **PDF Classification** - Analyzes the PDF to detect:
-   - `has_text`: Whether extractable text is present
-   - `has_borders`: Whether tables have visible borders
-   - `is_scanned`: Whether the PDF is scanned/image-based
-   - `layout_type`: 'tabular', 'borderless', 'text-only', or 'mixed'
+1. **Page Rendering** — Each PDF page is rendered to a high-res PNG (144 DPI) using PyMuPDF
+2. **GLM-OCR Recognition** — The image is sent to GLM-OCR via Ollama with a "Table Recognition:" prompt
+3. **Markdown Parsing** — The model returns markdown tables which are parsed via `parse_markdown_tables()`
+4. **Product Extraction** — Parsed tables are converted to Product objects via `extract_products_from_table()`
+5. **Text Fallback** — If no tables are found in the markdown, regex-based text extraction is used
+6. **Validation** — Filters out false positives (spec data mistaken for products)
 
-2. **Multi-Column Detection** - Samples first 15 pages for two-column OTC-style layouts:
-   - Builds word x-coverage histogram to find vertical gaps (≥10pt, density ≤1)
-   - Verifies OTC item codes (`[A-Z]\d{1,3}`) appear on both sides of the gap
-   - If detected, multicolumn extraction runs first on every page (confidence 0.95)
-   - Falls back to single-column parsing for half-filled pages (e.g., last product page)
+### GLM-OCR Setup
 
-3. **Smart Method Selection** - Based on classification (if multicolumn not detected):
+GLM-OCR requires Ollama running with the `glm-ocr` model:
 
-| PDF Type | Methods Used |
-|----------|--------------|
-| Multi-column OTC | multicolumn (word-level) → fallback to table methods |
-| Digital + Bordered | Camelot → pdfplumber → PyMuPDF → pdfminer |
-| Digital + Borderless | img2table → pdfplumber → Docling → pymupdf4llm |
-| Scanned | Docling → unstructured |
-| Text-only | pymupdf4llm → pdfminer |
+```bash
+# Install model
+ollama pull glm-ocr
 
-4. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
+# Verify
+ollama list | grep glm-ocr
+```
 
-5. **Fallback** - Merges results from all methods if no single method is sufficient, then tries regex as last resort
+Configure the Ollama endpoint via environment variable:
+```bash
+# Default: localhost
+export OLLAMA_HOST=http://localhost:11434
 
-6. **Validation** - Filters out false positives (spec data mistaken for products)
+# Remote server (e.g., mini01)
+export OLLAMA_HOST=http://mini01:11434
 
-### Available Methods (by confidence)
+# Or use SSH tunnel
+ssh -L 11434:localhost:11434 mini01
+```
 
-| Method | Confidence | Best For |
-|--------|------------|----------|
-| Camelot | 1.0 | Bordered tables (requires ghostscript) |
-| Docling | 0.98 | Complex tables, scanned docs (IBM AI) |
-| Multi-column | 0.95 | Two-column OTC catalogs with multi-line products |
-| pdfplumber | 0.95 | General tables |
-| PyMuPDF | 0.93 | Fast native table detection |
-| Unstructured | 0.92 | Varied document layouts |
-| img2table | 0.90 | Borderless tables |
-| pymupdf4llm | 0.85 | Layout-aware markdown text |
-| pdfminer | 0.80 | Text layout analysis |
-| Regex | 0.50 | Text pattern fallback |
+### GLM-OCR Model Details
+
+- **Model**: GLM-OCR (0.9B params, MIT license)
+- **Architecture**: CogViT encoder + GLM-0.5B decoder
+- **Benchmark**: #1 on OmniDocBench V1.5 (94.62 score)
+- **Speed**: ~1.86 pages/sec (GPU), ~0.67 images/sec
+- **Confidence**: 0.97 (assigned to all extracted products)
 
 ### Usage
 
@@ -279,31 +277,42 @@ uv run extractor export catalog-name
 **Core (always available):**
 - pdfplumber, pdfminer.six, flask, rich, typer, pandas, pymupdf, pymupdf4llm
 
-**Optional (for better accuracy):**
-- camelot-py (requires system ghostscript)
-- docling (downloads ~500MB AI models)
-- unstructured[pdf] (document understanding)
-- img2table
+**Runtime (required for extraction):**
+- Ollama with `glm-ocr` model (see GLM-OCR Setup above)
 
 **Dev:**
 - pytest, pytest-cov
-
-Install optional:
-```bash
-uv pip install docling img2table "unstructured[pdf]"
-```
 
 Install dev:
 ```bash
 uv pip install pytest pytest-cov
 ```
 
+## GLM-OCR Client
+
+Defined in `glm_ocr.py`. Communicates with GLM-OCR via the Ollama HTTP API.
+
+```python
+from extractor.glm_ocr import GlmOcrClient
+
+client = GlmOcrClient()  # uses OLLAMA_HOST env var or localhost:11434
+client.check_availability()  # True if Ollama has glm-ocr model
+markdown = client.recognize_table(png_bytes)  # "Table Recognition:" prompt
+text = client.recognize_text(png_bytes)       # "Text Recognition:" prompt
+```
+
+- Uses `urllib.request` (no extra dependencies)
+- Timeout: 120 seconds per request
+- Raises `GlmOcrError` on connection/parsing failures
+
 ## Troubleshooting
 
-### Docling freezes on first run
-AI models downloading (~500MB). Check progress:
+### GLM-OCR not available
+Ensure Ollama is running and has the model:
 ```bash
-du -sh ~/.cache/huggingface/hub/models--docling-project*
+ollama list | grep glm-ocr
+# If not listed:
+ollama pull glm-ocr
 ```
 
 ### Empty extractions
