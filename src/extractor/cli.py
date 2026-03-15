@@ -368,12 +368,12 @@ def web_verify(
         help="Name of the catalog to verify (without extension). If not provided, opens in dashboard mode.",
     ),
     port: int = typer.Option(
-        5000,
+        5001,
         "--port", "-p",
         help="Port to run the web server on",
     ),
     host: str = typer.Option(
-        "127.0.0.1",
+        "0.0.0.0",
         "--host",
         help="Host to bind the server to",
     ),

@@ -20,7 +20,7 @@ class GlmOcrClient:
     Reads OLLAMA_HOST env var (default http://localhost:11434).
     """
 
-    def __init__(self, host: str | None = None, model: str = "glm-ocr", timeout: int = 120):
+    def __init__(self, host: str | None = None, model: str = "glm-ocr:q8_0", timeout: int = 120):
         self.host = (host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
         self.model = model
         self.timeout = timeout

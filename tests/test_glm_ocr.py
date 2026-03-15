@@ -44,7 +44,7 @@ class TestGlmOcrClientInit:
 
     def test_default_model(self):
         client = GlmOcrClient()
-        assert client.model == "glm-ocr"
+        assert client.model == "glm-ocr:q8_0"
 
     def test_custom_model(self):
         client = GlmOcrClient(model="glm-ocr:latest")
@@ -56,7 +56,7 @@ class TestGlmOcrClientCheckAvailability:
     def test_available(self, mock_urlopen):
         resp = MagicMock()
         resp.read.return_value = json.dumps({
-            "models": [{"name": "glm-ocr:latest"}, {"name": "llama3:8b"}]
+            "models": [{"name": "glm-ocr:q8_0"}, {"name": "llama3:8b"}]
         }).encode()
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)

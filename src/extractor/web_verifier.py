@@ -968,7 +968,7 @@ def extract_text_from_region():
 
 
 def run_server(pdf_path: Path = None, session: ExtractionSession = None,
-               session_dir: Path = None, host: str = '127.0.0.1', port: int = 5000,
+               session_dir: Path = None, host: str = '0.0.0.0', port: int = 5001,
                debug: bool = False, dashboard_mode: bool = False):
     """Run the Flask development server."""
     init_app(pdf_path, session, session_dir, dashboard_mode=dashboard_mode)

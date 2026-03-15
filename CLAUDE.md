@@ -77,43 +77,24 @@ Uses **GLM-OCR** (via Ollama) as the sole extraction method. Each page is render
 
 ### GLM-OCR Setup
 
-Requires Ollama running with the `glm-ocr` model:
+Runs on mini01 with Ollama. Default model is `glm-ocr:q8_0`.
 
 ```bash
-# Install model (F16 — full precision, 2.2 GB)
-ollama pull glm-ocr
-
-# Or Q8 quantized (faster, 1.6 GB, ~22% speed improvement)
+# Install model (Q8 — default, 1.6 GB)
 ollama pull glm-ocr:q8_0
 
 # Verify
 ollama list | grep glm-ocr
 ```
 
-Configure Ollama endpoint:
-```bash
-# Default: localhost
-export OLLAMA_HOST=http://localhost:11434
-
-# Remote server via SSH tunnel (recommended for mini01)
-ssh -f -N -L 11434:localhost:11434 mini01
-```
-
 ### GLM-OCR Model Details
 
-- **Model**: GLM-OCR (1.1B params, MIT license)
+- **Model**: GLM-OCR (0.9B params, MIT license)
 - **Architecture**: CogViT encoder + GLM-0.5B decoder
 - **Benchmark**: #1 on OmniDocBench V1.5 (94.62 score)
 - **Output format**: HTML `<table>` elements (not markdown as documented)
 - **Context length**: 131,072 tokens
-
-### Available Quantizations
-
-| Tag | Size | Speed (M4 GPU) |
-|-----|------|-----------------|
-| `glm-ocr:latest` (F16) | 2.2 GB | ~29 sec/page |
-| `glm-ocr:q8_0` | 1.6 GB | ~23 sec/page |
-| `glm-ocr:bf16` | 2.2 GB | ~29 sec/page |
+- **Default quantization**: Q8 (`glm-ocr:q8_0`, 1.6 GB, ~23 sec/page on M4)
 
 ### Performance Benchmarks (tested on mini01 Mac Mini M4)
 
@@ -152,15 +133,7 @@ ssh -f -N -L 11434:localhost:11434 mini01
 from extractor.auto_extractor import AutoExtractor
 
 extractor = AutoExtractor(pdf_path, session_dir)
-session = extractor.run()
-```
-
-To use Q8 model:
-```python
-from extractor.glm_ocr import GlmOcrClient
-ext = AutoExtractor(pdf_path, session_dir)
-ext._glm_client = GlmOcrClient(model="glm-ocr:q8_0")
-session = ext.run()
+session = extractor.run()  # uses glm-ocr:q8_0 by default
 ```
 
 ## Web UI
@@ -244,11 +217,11 @@ Test configuration is in `pyproject.toml` (`[tool.pytest.ini_options]`).
 
 ## Common Commands
 
+All commands run on mini01 (`~/catalogdataextractor/`).
+
 ```bash
-# Start web UI (port 5001)
+# Start web UI (binds 0.0.0.0:5001, accessible from LAN)
 ./start.sh
-# or
-uv run extractor web-verify --port 5001
 
 # CLI extraction
 uv run extractor auto catalogs/file.pdf
@@ -258,14 +231,11 @@ uv run extractor status
 
 # Export to CSV
 uv run extractor export catalog-name
-
-# SSH tunnel to mini01 Ollama
-ssh -f -N -L 11434:localhost:11434 mini01
 ```
 
 ## Server Deployment (mini01)
 
-Project is deployed on mini01 at `~/catalogdataextractor/`.
+Project runs on mini01 at `~/catalogdataextractor/`. Web UI accessible at `http://mini01:5001`.
 
 ```bash
 # Sync code to mini01
@@ -274,9 +244,6 @@ rsync -avz --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
 
 # Install deps on mini01
 ssh mini01 "cd ~/catalogdataextractor && uv sync"
-
-# Run extraction on mini01 directly
-ssh mini01 "cd ~/catalogdataextractor && uv run extractor auto catalogs/file.pdf"
 ```
 
 ## Dependencies
@@ -285,7 +252,7 @@ ssh mini01 "cd ~/catalogdataextractor && uv run extractor auto catalogs/file.pdf
 - pdfplumber, pdfminer.six, flask, rich, typer, pandas, pymupdf, pymupdf4llm
 
 **Runtime (required for extraction):**
-- Ollama with `glm-ocr` model (see GLM-OCR Setup above)
+- Ollama with `glm-ocr:q8_0` model on mini01 (see GLM-OCR Setup above)
 
 **Dev:**
 - pytest, pytest-cov
@@ -293,18 +260,17 @@ ssh mini01 "cd ~/catalogdataextractor && uv run extractor auto catalogs/file.pdf
 ## Troubleshooting
 
 ### GLM-OCR not available
-Ensure Ollama is running and has the model:
+Ensure Ollama is running on mini01 and has the model:
 ```bash
 ollama list | grep glm-ocr
 # If not listed:
-ollama pull glm-ocr
+ollama pull glm-ocr:q8_0
 ```
 
 ### Ollama 500 errors
 The model may return HTTP 500 when overloaded. The client retries automatically (2 retries with 2s/4s backoff). If persistent, check Ollama logs:
 ```bash
-# On mini01
-ssh mini01 "journalctl -u ollama --tail 20"
+journalctl -u ollama --tail 20
 ```
 
 ### Empty extractions
