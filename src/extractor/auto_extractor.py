@@ -401,7 +401,7 @@ class AutoExtractor:
     def _extract_page(self, reader: PDFReader, page_num: int) -> list[Product]:
         """Extract products from a single page using GLM-OCR."""
         # Render page to image
-        png_bytes = reader.render_page_to_png(page_num)
+        png_bytes = reader.render_page_to_png(page_num, zoom=1.5)
         if not png_bytes:
             self.empty_pages.append(page_num)
             return []

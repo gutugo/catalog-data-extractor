@@ -64,19 +64,22 @@ class GlmOcrClient:
         """
         return self._call("Text Recognition:", image_bytes)
 
-    def _call(self, prompt: str, image_bytes: bytes) -> str:
-        """Send image + prompt to Ollama chat API.
+    def _call(self, prompt: str, image_bytes: bytes, retries: int = 2) -> str:
+        """Send image + prompt to Ollama chat API with retry.
 
         Args:
             prompt: The recognition prompt
             image_bytes: PNG image bytes
+            retries: Number of retries on 500 errors (model busy)
 
         Returns:
             Response text from the model
 
         Raises:
-            GlmOcrError: On any failure
+            GlmOcrError: On any failure after retries exhausted
         """
+        import time
+
         b64_image = base64.b64encode(image_bytes).decode("ascii")
 
         payload = json.dumps({
@@ -91,26 +94,38 @@ class GlmOcrClient:
             "stream": False,
         }).encode("utf-8")
 
-        req = urllib.request.Request(
-            f"{self.host}/api/chat",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        last_error = None
+        for attempt in range(1 + retries):
+            req = urllib.request.Request(
+                f"{self.host}/api/chat",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read())
-        except urllib.error.URLError as e:
-            raise GlmOcrError(f"Connection failed: {e}") from e
-        except urllib.error.HTTPError as e:
-            raise GlmOcrError(f"HTTP {e.code}: {e.reason}") from e
-        except TimeoutError as e:
-            raise GlmOcrError(f"Request timed out after {self.timeout}s") from e
-        except json.JSONDecodeError as e:
-            raise GlmOcrError(f"Malformed response: {e}") from e
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read())
+                # Success
+                try:
+                    return data["message"]["content"]
+                except (KeyError, TypeError) as e:
+                    raise GlmOcrError(f"Unexpected response structure: {e}") from e
+            except urllib.error.HTTPError as e:
+                last_error = GlmOcrError(f"HTTP {e.code}: {e.reason}")
+                if e.code >= 500 and attempt < retries:
+                    time.sleep(2 * (attempt + 1))  # backoff: 2s, 4s
+                    continue
+                raise last_error from e
+            except urllib.error.URLError as e:
+                raise GlmOcrError(f"Connection failed: {e}") from e
+            except TimeoutError as e:
+                last_error = GlmOcrError(f"Request timed out after {self.timeout}s")
+                if attempt < retries:
+                    time.sleep(2)
+                    continue
+                raise last_error from e
+            except json.JSONDecodeError as e:
+                raise GlmOcrError(f"Malformed response: {e}") from e
 
-        try:
-            return data["message"]["content"]
-        except (KeyError, TypeError) as e:
-            raise GlmOcrError(f"Unexpected response structure: {e}") from e
+        raise last_error or GlmOcrError("Unknown error")
