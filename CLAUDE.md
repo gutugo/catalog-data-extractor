@@ -77,7 +77,7 @@ Uses **GLM-OCR** (via Ollama) as the sole extraction method. Each page is render
 
 ### GLM-OCR Setup
 
-Runs on mini01 with Ollama. Default model is `glm-ocr:q8_0`.
+Runs via Ollama. Default model is `glm-ocr:q8_0`.
 
 ```bash
 # Install model (Q8 — default, 1.6 GB)
@@ -96,7 +96,7 @@ ollama list | grep glm-ocr
 - **Context length**: 131,072 tokens
 - **Default quantization**: Q8 (`glm-ocr:q8_0`, 1.6 GB, ~23 sec/page on M4)
 
-### Performance Benchmarks (tested on mini01 Mac Mini M4)
+### Performance Benchmarks (Mac Mini M4)
 
 | Catalog | Pages | Products | Time (F16) | Time (Q8) |
 |---------|-------|----------|------------|-----------|
@@ -104,7 +104,7 @@ ollama list | grep glm-ocr
 | AETNA OTC | 40 | 955 | ~15:00 | — |
 | Vascular Surgery | 264 | 71 | — | 47:43 |
 
-**Bottleneck is model inference** (~23-29 sec/page), not network. Running on mini01 directly vs remote SSH tunnel makes minimal difference.
+**Bottleneck is model inference** (~23-29 sec/page), not network.
 
 ### GLM-OCR vs Old Pipeline Comparison
 
@@ -217,8 +217,6 @@ Test configuration is in `pyproject.toml` (`[tool.pytest.ini_options]`).
 
 ## Common Commands
 
-All commands run on mini01 (`~/catalogdataextractor/`).
-
 ```bash
 # Start web UI (binds 0.0.0.0:5001, accessible from LAN)
 ./start.sh
@@ -233,26 +231,13 @@ uv run extractor status
 uv run extractor export catalog-name
 ```
 
-## Server Deployment (mini01)
-
-Project runs on mini01 at `~/catalogdataextractor/`. Web UI accessible at `http://mini01:5001`.
-
-```bash
-# Sync code to mini01
-rsync -avz --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
-  /Users/sk/catalogdataextractor/ mini01:~/catalogdataextractor/
-
-# Install deps on mini01
-ssh mini01 "cd ~/catalogdataextractor && uv sync"
-```
-
 ## Dependencies
 
 **Core (always available):**
 - pdfplumber, pdfminer.six, flask, rich, typer, pandas, pymupdf, pymupdf4llm
 
 **Runtime (required for extraction):**
-- Ollama with `glm-ocr:q8_0` model on mini01 (see GLM-OCR Setup above)
+- Ollama with `glm-ocr:q8_0` model (see GLM-OCR Setup above)
 
 **Dev:**
 - pytest, pytest-cov
@@ -260,7 +245,7 @@ ssh mini01 "cd ~/catalogdataextractor && uv sync"
 ## Troubleshooting
 
 ### GLM-OCR not available
-Ensure Ollama is running on mini01 and has the model:
+Ensure Ollama is running and has the model:
 ```bash
 ollama list | grep glm-ocr
 # If not listed:

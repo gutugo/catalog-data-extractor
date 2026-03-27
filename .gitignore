@@ -23,3 +23,9 @@ uv.lock
 .vscode/
 *.swp
 *.swo
+
+# Coverage
+.coverage
+
+# Internal reference docs
+reference_*.md
