@@ -143,16 +143,23 @@ session = extractor.run()  # uses glm-ocr:q8_0 by default
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/catalogs` | List all catalogs with status |
+| POST | `/api/upload` | Upload a PDF catalog |
 | POST | `/api/extract/<name>` | Start extraction |
 | GET | `/api/extract/<name>/status` | Check extraction progress |
 | POST | `/api/switch/<name>` | Switch active catalog |
 | GET | `/api/page/<num>` | Get page products |
-| GET | `/api/page/<num>/image` | Get page as PNG |
+| GET | `/api/page/<num>/image` | Get page as PNG (supports `?zoom=` param) |
+| PUT | `/api/product/<id>` | Update a product's fields |
+| POST | `/api/product` | Add a new product |
+| DELETE | `/api/product/<id>` | Delete a product |
+| POST | `/api/extract-text` | Extract text from a selected PDF region |
+| GET | `/api/stats` | Session statistics and confidence data |
 | POST | `/api/save` | Save session |
 | POST | `/api/export-csv` | Export to CSV |
+| POST | `/api/shutdown` | Graceful server shutdown |
 
 ### CSRF Protection
-All POST endpoints require `X-CSRF-Token` header.
+All POST/PUT/DELETE endpoints require `X-CSRF-Token` header.
 
 ## Column Detection
 
@@ -233,8 +240,8 @@ uv run extractor export catalog-name
 
 ## Dependencies
 
-**Core (always available):**
-- pdfplumber, pdfminer.six, flask, rich, typer, pandas, pymupdf, pymupdf4llm
+**Core (always installed):**
+- pdfplumber, flask, rich, typer, pandas, pymupdf, pymupdf4llm
 
 **Runtime (required for extraction):**
 - Ollama with `glm-ocr:q8_0` model (see GLM-OCR Setup above)

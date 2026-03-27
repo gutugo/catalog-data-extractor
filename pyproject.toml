@@ -14,20 +14,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional extraction methods (some have Python version constraints)
-extraction = [
-    "camelot-py>=0.11.0",  # Table extraction (requires ghostscript)
-    "docling>=2.0.0",      # AI-powered table extraction (IBM)
-]
-# img2table requires numba/llvmlite which don't support Python 3.14 yet
-img2table = [
-    "img2table>=1.2.0",    # Borderless table detection (Python <3.14)
-]
-all = [
-    "camelot-py>=0.11.0",
-    "docling>=2.0.0",
-    "img2table>=1.2.0",
-]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
