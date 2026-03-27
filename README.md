@@ -1,15 +1,15 @@
 # Catalog Data Extractor
 
-Extract product data from PDF supplier catalogs using smart automatic extraction with a web-based verification UI.
+Extract product data from PDF supplier catalogs using GLM-OCR vision-based AI with a web-based verification UI.
 
 ## Features
 
-- **Smart automatic extraction** - Classifies PDFs and selects optimal extraction methods
-- **Multi-column support** - Word-level extraction for two-column OTC catalogs with multi-line products
-- **Multi-method pipeline** - Tries multiple extraction methods with confidence scoring
+- **GLM-OCR extraction** - Vision-based table recognition via Ollama, handles both structured and unstructured catalogs
 - **Drag-and-drop upload** - Add PDF catalogs directly in the browser
-- **Split-view verification** - PDF on left, extracted data on right
-- **Field-by-field review** - Cycle through each field for quick verification
+- **Split-view verification** - PDF page on left, extracted data on right
+- **Inline editing** - Edit, add, or delete products per page
+- **Region text extraction** - Draw a box on the PDF to pull text from a specific area
+- **Confidence scoring** - Highlights low-confidence extractions for review
 - **One-click CSV export** - Download results directly from the UI
 - **Multi-catalog dashboard** - Manage multiple catalogs in one session
 
@@ -17,6 +17,7 @@ Extract product data from PDF supplier catalogs using smart automatic extraction
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
+- [Ollama](https://ollama.com/) with the GLM-OCR model
 
 ## Installation
 
@@ -28,24 +29,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone <repo-url>
 cd catalogdataextractor
 uv sync
-```
 
-### Optional Dependencies
-
-For better extraction accuracy, install optional packages:
-
-```bash
-uv pip install docling img2table pymupdf4llm pymupdf "unstructured[pdf]"
-```
-
-For Camelot (bordered tables), install Ghostscript:
-
-```bash
-# macOS
-brew install ghostscript
-
-# Ubuntu/Debian
-apt install ghostscript
+# Install GLM-OCR model (Q8 quantization, 1.6 GB)
+ollama pull glm-ocr:q8_0
 ```
 
 ## Quick Start
@@ -56,20 +42,19 @@ apt install ghostscript
 ./start.sh
 ```
 
-Opens browser at http://127.0.0.1:5001
+Opens browser at http://localhost:5001
 
 ### 2. Upload a Catalog
 
 - Drag and drop a PDF onto the upload zone, or click to browse
-- Extraction starts automatically
-- Progress shows in the sidebar
+- Click **Extract** to start — progress shows in the sidebar
 
 ### 3. Verify Extracted Data
 
 - Click a catalog in the sidebar to open it
-- Use **Start Verification** to cycle through each field
-- Edit products inline, add missing ones, delete errors
+- Edit products inline, add missing ones, delete false positives
 - Navigate pages with arrow keys or buttons
+- Use **Start Verification** to cycle through fields one by one
 
 ### 4. Export to CSV
 
@@ -77,66 +62,40 @@ Click **Update CSV** to export. Files save to `processed/extractions/`.
 
 ## How Extraction Works
 
-### PDF Classification
+Each PDF page goes through this pipeline:
 
-The extractor automatically analyzes each PDF to detect:
-- `has_text` - Whether extractable text is present
-- `has_borders` - Whether tables have visible borders
-- `is_scanned` - Whether the PDF is scanned/image-based
-- `layout_type` - 'tabular', 'borderless', 'text-only', or 'mixed'
+1. **Page rendering** - Page rendered to PNG at 108 DPI (zoom=1.5) via PyMuPDF
+2. **GLM-OCR recognition** - Image sent to GLM-OCR via Ollama with "Table Recognition:" prompt
+3. **Table parsing** - Response parsed as HTML tables (`<table>` elements) or markdown tables (pipe-delimited)
+4. **Product extraction** - Tables converted to products via column detection (header patterns, content patterns, width heuristics)
+5. **Text fallback** - If no tables found, regex patterns extract products from raw OCR text
+6. **Validation** - Filters out false positives (spec data, measurements, standards codes mistaken for products)
+7. **Retry** - On Ollama 500 errors, retries up to 2 times with backoff (2s, 4s)
 
-### Smart Method Selection
+### GLM-OCR Model
 
-Based on classification, optimal methods are selected:
+- **Model**: [GLM-OCR](https://huggingface.co/ucaslcl/GOT-OCR2_0) (0.9B params, MIT license)
+- **Architecture**: CogViT encoder + GLM-0.5B decoder
+- **Benchmark**: #1 on OmniDocBench V1.5 (94.62 score)
+- **Output**: HTML `<table>` elements
+- **Default quantization**: Q8 (`glm-ocr:q8_0`, 1.6 GB)
+- **Speed**: ~23 sec/page on Apple M4
 
-| PDF Type | Methods Used |
-|----------|--------------|
-| Multi-column OTC | multicolumn (word-level) → fallback to table methods |
-| Digital + Bordered | Camelot → pdfplumber → PyMuPDF → pdfminer |
-| Digital + Borderless | img2table → pdfplumber → Docling → pymupdf4llm |
-| Scanned | Docling → unstructured |
-| Text-only | pymupdf4llm → pdfminer |
+### Performance
 
-### Available Methods
+| Catalog | Pages | Products | Time (Q8, M4) |
+|---------|-------|----------|---------------|
+| OTC catalog (36 pages, structured tables) | 36 | 960 | ~14 min |
+| OTC catalog (40 pages, structured tables) | 40 | 955 | ~15 min |
+| Surgical instruments (264 pages, unstructured) | 264 | 71 | ~48 min |
 
-| Method | Confidence | Best For |
-|--------|------------|----------|
-| Camelot | 1.0 | Bordered tables (requires ghostscript) |
-| Docling | 0.98 | Complex tables, scanned docs (IBM AI) |
-| Multi-column | 0.95 | Two-column OTC catalogs with multi-line products |
-| pdfplumber | 0.95 | General tables |
-| PyMuPDF | 0.93 | Fast native table detection |
-| Unstructured | 0.92 | Varied document layouts |
-| img2table | 0.90 | Borderless tables |
-| pymupdf4llm | 0.85 | Layout-aware markdown text |
-| pdfminer | 0.80 | Text layout analysis |
-| Regex | 0.50 | Text pattern fallback |
-
-### Multi-Column Extraction
-
-For two-column OTC catalogs (e.g., AETNA) where products span multiple lines per column:
-
-1. Extracts words with x/y positions from each page
-2. Detects column gaps via word coverage histogram
-3. Splits words into columns, reconstructs lines, parses multi-line products
-4. Produces clean `item_no` ("A1 / 446761"), `product_name`, `pkg`, and `uom`
-
-This runs automatically when the layout is detected — no configuration needed.
-
-### Pipeline Behavior
-
-1. **Multi-Column Check** - If two-column layout detected, tries word-level extraction first
-2. **Early Stopping** - Stops when a method finds products with confidence >= 0.85
-3. **Fallback** - Merges results from all methods if no single method is sufficient
-4. **Validation** - Filters out false positives (spec data mistaken for products)
-
-## Web UI Guide
+## Web UI
 
 ### Dashboard
 
 The sidebar shows all catalogs with status badges:
 - **Not extracted** - PDF uploaded, needs extraction
-- **Extracting...** - Extraction in progress
+- **Extracting...** - Extraction in progress with page counter
 - **Ready** - Extracted, ready for verification
 - **Exported** - CSV has been generated
 
@@ -155,14 +114,29 @@ Click **Start Verification** to enter field-by-field review:
 
 | Key | Action |
 |-----|--------|
-| ← / → | Previous / next page |
+| ← / → | Previous / next page (when not in verification mode) |
 
-### Actions
+## CLI Commands
 
-- **Add Product** - Manually add a product to current page
-- **Save** - Save session to disk
-- **Update CSV** - Export to CSV file
-- **Exit** - Close with unsaved changes check
+```bash
+# Start web UI (dashboard mode, port 5001)
+./start.sh
+
+# Start with a specific catalog
+uv run extractor web-verify catalog-name
+
+# Auto-extract from CLI
+uv run extractor auto catalogs/file.pdf
+
+# Check extraction status
+uv run extractor status
+
+# Export to CSV
+uv run extractor export catalog-name
+
+# View raw page text
+uv run extractor view catalogs/file.pdf --page 3
+```
 
 ## Output Format
 
@@ -172,46 +146,30 @@ CSV files contain:
 |--------|---------|
 | product_name | Toothpaste, Crest Sensi-Relief |
 | description | 4.1 oz. |
-| item_no | 5811 |
+| item_no | O98 / 100032 |
 | pkg | 1 |
 | uom | ct |
 | page_number | 10 |
 | source_file | catalog.pdf |
 
-## CLI Commands
-
-```bash
-# Start web UI (port 5001)
-./start.sh
-# or
-uv run extractor web-verify --port 5001
-
-# Auto-extract without UI
-uv run extractor auto catalogs/file.pdf
-
-# Check extraction status
-uv run extractor status
-
-# Export to CSV
-uv run extractor export catalog-name
-```
-
 ## Troubleshooting
 
-### Docling freezes on first run
+### GLM-OCR not available
 
-AI models are downloading (~500MB). Check progress:
+Ensure Ollama is running and has the model:
 ```bash
-du -sh ~/.cache/huggingface/hub/models--docling-project*
+ollama list | grep glm-ocr
+# If not listed:
+ollama pull glm-ocr:q8_0
 ```
 
 ### Empty extractions (0 products)
 
 1. Check if it's a **product listing catalog** (has SKUs/item numbers) vs a **brochure** (just descriptions)
-2. Brochures correctly return 0 products - they're not compatible with this tool
-3. Check available methods:
+2. Brochures correctly return 0 products - they don't contain structured product data
+3. Check GLM-OCR connectivity:
 ```bash
-uv run python -c "from extractor.pdf_reader import *; print('Docling:', DOCLING_AVAILABLE); print('Camelot:', CAMELOT_AVAILABLE)"
+uv run python -c "from extractor.glm_ocr import GlmOcrClient; print(GlmOcrClient().check_availability())"
 ```
 
 ### Re-extract a catalog
@@ -231,11 +189,18 @@ uv run extractor web-verify --port 5002
 
 ```
 src/extractor/
-  auto_extractor.py     # Smart pipeline extraction
-  pdf_reader.py         # PDF reading and table extraction methods
+  auto_extractor.py     # GLM-OCR pipeline orchestrator + text fallback
+  glm_ocr.py            # GLM-OCR client via Ollama HTTP API
+  column_detection.py   # Column mapping and table-to-product extraction
+  parsing_utils.py      # HTML/markdown table parsing, count/UOM helpers
+  patterns.py           # Regex patterns and confidence constants
+  product_validation.py # False-positive filtering
+  multicolumn.py        # Two-column layout detection
+  pdf_reader.py         # PDF reading and page rendering
   web_verifier.py       # Flask web UI (port 5001)
   data_model.py         # Product/Session data models
   cli.py                # CLI commands
+  exporter.py           # CSV export
   templates/            # HTML templates
 catalogs/               # Input PDF files
 processed/
